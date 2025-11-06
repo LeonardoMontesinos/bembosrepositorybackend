@@ -60,7 +60,20 @@ export const handler = async (event) => {
         })
       );
 
-      return response(201, { message: "Order created successfully", orderId });
+      
+      return response(201, {
+        message: "Order created successfully",
+        order: {
+          orderId,
+          tenantId,
+          status: "CREATED",
+          items,
+          total,
+          createdAt: now,
+          updatedAt: now,
+          createdBy: user.sub || "anonymous"
+        }
+      });      
     }
 
     // --- Listar pedidos ---
