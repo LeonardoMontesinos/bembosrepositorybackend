@@ -85,8 +85,7 @@ exports.handler = async (event) => {
 			new QueryCommand({
 				TableName: USERS_TABLE,
 				IndexName: "EmailIndex",
-				KeyConditionExpression: "email = :email",
-				FilterExpression: "tenantId = :tenantId",
+				KeyConditionExpression: "email = :email AND tenantId = :tenantId",
 				ExpressionAttributeValues: {
 					":email": { S: normalizedEmail },
 					":tenantId": { S: tenantId },
@@ -103,8 +102,7 @@ exports.handler = async (event) => {
 			new QueryCommand({
 				TableName: USERS_TABLE,
 				IndexName: "UsernameIndex",
-				KeyConditionExpression: "username = :username",
-				FilterExpression: "tenantId = :tenantId",
+				KeyConditionExpression: "username = :username AND tenantId = :tenantId",
 				ExpressionAttributeValues: {
 					":username": { S: normalizedUsername },
 					":tenantId": { S: tenantId },

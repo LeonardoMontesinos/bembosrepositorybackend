@@ -19,8 +19,6 @@ provider:
     ORDERS_BUCKET: restaurant-orders-dashboard-${sls:stage}
     MENU_TABLE: MenuTable-${sls:stage}
     MENU_BUCKET: menu-bucket-${sls:stage}
-    INCIDENT_TABLE: IncidentTable-${sls:stage}
-    CONNECTIONS_TABLE: WebSocketConnections-${sls:stage}
     JWT_SECRET: ${env:JWT_SECRET}
     ALLOWED_ORIGINS: ${env:ALLOWED_ORIGINS, '*'}
     CORS_ALLOW_CREDENTIALS: ${env:CORS_ALLOW_CREDENTIALS, 'false'}
@@ -111,6 +109,38 @@ functions:
           method: post
           cors: true
 
+  createKitchen:
+    handler: kitchen/createKitchen.handler
+    events:
+      - http:
+          path: kitchens
+          method: post
+          cors: true
+          authorizer:
+            name: authorizer
+            type: request
+            identitySource: method.request.header.Authorization
+
+  listKitchens:
+    handler: kitchen/listKitchens.handler
+    events:
+      - http:
+          path: kitchens
+          method: get
+          cors: true
+          authorizer:
+            name: authorizer
+            type: request
+            identitySource: method.request.header.Authorization
+
+  getMenu:
+    handler: kitchen/getMenu.handler
+    events:
+      - http:
+          path: menu
+          method: get
+          cors: true
+
 resources:
   Resources:
 
@@ -124,18 +154,25 @@ resources:
           - { AttributeName: userId, AttributeType: S }
           - { AttributeName: email, AttributeType: S }
           - { AttributeName: username, AttributeType: S }
+          - { AttributeName: role, AttributeType: S }
         KeySchema:
           - { AttributeName: userId, KeyType: HASH }
+          - { AttributeName: tenantId, KeyType: RANGE }
         GlobalSecondaryIndexes:
-          - IndexName: TenantEmailIndex
+          - IndexName: EmailIndex
             KeySchema:
-              - { AttributeName: tenantId, KeyType: HASH }
-              - { AttributeName: email, KeyType: RANGE }
+              - { AttributeName: email, KeyType: HASH }
+              - { AttributeName: tenantId, KeyType: RANGE }
             Projection: { ProjectionType: ALL }
-          - IndexName: TenantUsernameIndex
+          - IndexName: UsernameIndex
+            KeySchema:
+              - { AttributeName: username, KeyType: HASH }
+              - { AttributeName: tenantId, KeyType: RANGE }
+            Projection: { ProjectionType: ALL }
+          - IndexName: TenantRoleIndex
             KeySchema:
               - { AttributeName: tenantId, KeyType: HASH }
-              - { AttributeName: username, KeyType: RANGE }
+              - { AttributeName: role, KeyType: RANGE }
             Projection: { ProjectionType: ALL }
 
     OrdersTable:
@@ -162,11 +199,24 @@ resources:
         BillingMode: PAY_PER_REQUEST
         AttributeDefinitions:
           - { AttributeName: tenantId, AttributeType: S }
-          - { AttributeName: menuId, AttributeType: S }
+          - { AttributeName: dishId, AttributeType: S }
         KeySchema:
-          - { AttributeName: menuId, KeyType: HASH }
+          - { AttributeName: tenantId, KeyType: HASH }
+          - { AttributeName: dishId, KeyType: RANGE }
 
     MenuBucket:
       Type: AWS::S3::Bucket
       Properties:
         BucketName: ${self:provider.environment.MENU_BUCKET}
+
+    KitchenTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: KitchenTable-${sls:stage}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - { AttributeName: tenantId, AttributeType: S }
+          - { AttributeName: kitchenId, AttributeType: S }
+        KeySchema:
+          - { AttributeName: tenantId, KeyType: HASH }
+          - { AttributeName: kitchenId, KeyType: RANGE }

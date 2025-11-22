@@ -50,11 +50,11 @@ const { json } = require("../http");
 exports.handler = async (event) => {
   try {
     const body = JSON.parse(event.body);
-    const { tenantId, email, password } = body;
+  const { tenantId, email, username, password } = body;
 
     // Validar campos requeridos
-    if (!tenantId || !email || !password) {
-      return json(400, { message: "Missing fields: tenantId, email (or username) and password are required" }, event);
+    if (!tenantId || (!email && !username) || !password) {
+      return json(400, { message: "Missing fields: tenantId, (email or username) and password are required" }, event);
     }
 
     if (typeof tenantId !== "string" || tenantId.trim() === "") {
@@ -62,23 +62,27 @@ exports.handler = async (event) => {
     }
 
     // Normalizar identificador (puede ser email o username)
-    const identifier = String(email).toLowerCase().trim();
+  const identifier = String(email || username).toLowerCase().trim();
 
     // Primero intentar buscar por email en EmailIndex (filtrando por tenant)
     let res;
     try {
-      res = await client.send(
-        new QueryCommand({
-          TableName: USERS_TABLE,
-          IndexName: "EmailIndex",
-          KeyConditionExpression: "email = :email",
-          FilterExpression: "tenantId = :tenantId",
-          ExpressionAttributeValues: {
-            ":email": { S: identifier },
-            ":tenantId": { S: tenantId },
-          },
-        })
-      );
+      if (email) {
+        res = await client.send(
+          new QueryCommand({
+            TableName: USERS_TABLE,
+            IndexName: "EmailIndex",
+            KeyConditionExpression: "email = :email AND tenantId = :tenantId",
+            ExpressionAttributeValues: {
+              ":email": { S: identifier },
+              ":tenantId": { S: tenantId },
+            },
+            Limit: 1,
+          })
+        );
+      } else {
+        res = { Items: [] };
+      }
     } catch (qErr) {
       // Si el índice no existe o hay otro error, lo ignoramos y seguiremos al siguiente intento
       console.warn("EmailIndex query failed, will fallback to username query or scan:", qErr.message || qErr);
@@ -86,18 +90,18 @@ exports.handler = async (event) => {
     }
 
     // Si no se encontró por email, intentar por username
-    if (!res.Items || res.Items.length === 0) {
+    if ((!res.Items || res.Items.length === 0) && username) {
       try {
         res = await client.send(
           new QueryCommand({
             TableName: USERS_TABLE,
             IndexName: "UsernameIndex",
-            KeyConditionExpression: "username = :username",
-            FilterExpression: "tenantId = :tenantId",
+            KeyConditionExpression: "username = :username AND tenantId = :tenantId",
             ExpressionAttributeValues: {
               ":username": { S: identifier },
               ":tenantId": { S: tenantId },
             },
+            Limit: 1,
           })
         );
       } catch (qErr) {
