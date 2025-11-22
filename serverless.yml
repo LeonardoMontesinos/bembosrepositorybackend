@@ -148,7 +148,7 @@ functions:
           path: menu
           method: get
           cors: true
-            authorizer:
+          authorizer:
               name: authorizer
               type: request
               identitySource: method.request.header.Authorization
