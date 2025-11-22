@@ -4,27 +4,38 @@ const { handleGet } = require('./get');
 const { handleCancel } = require('./cancel');
 const { getUserFromEvent, response } = require('./utils');
 
+// Export individual handlers for Serverless functions
+async function create(event) {
+  const user = getUserFromEvent(event);
+  return handleCreate(event, user);
+}
+
+async function list(event) {
+  const user = getUserFromEvent(event);
+  return handleList(event, user);
+}
+
+async function get(event) {
+  const user = getUserFromEvent(event);
+  return handleGet(event, user);
+}
+
+async function cancel(event) {
+  const user = getUserFromEvent(event);
+  return handleCancel(event, user);
+}
+
+// Backwards-compatible single handler
 async function handler(event) {
   const method = event.httpMethod;
   const path = event.path || '';
   const user = getUserFromEvent(event);
 
   try {
-    if (method === 'POST' && path === '/orders') {
-      return await handleCreate(event, user);
-    }
-
-    if (method === 'GET' && path === '/orders') {
-      return await handleList(event, user);
-    }
-
-    if (method === 'GET' && /^\/orders\/[^/]+$/.test(path)) {
-      return await handleGet(event, user);
-    }
-
-    if (method === 'DELETE' && /^\/orders\/[^/]+$/.test(path)) {
-      return await handleCancel(event, user);
-    }
+    if (method === 'POST' && path === '/orders') return await create(event);
+    if (method === 'GET' && path === '/orders') return await list(event);
+    if (method === 'GET' && /^\/orders\/[^/]+$/.test(path)) return await get(event);
+    if (method === 'DELETE' && /^\/orders\/[^/]+$/.test(path)) return await cancel(event);
 
     return response(404, { message: 'Route not found' });
   } catch (err) {
@@ -33,4 +44,4 @@ async function handler(event) {
   }
 }
 
-module.exports = { handler };
+module.exports = { create, list, get, cancel, handler };

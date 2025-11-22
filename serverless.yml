@@ -25,7 +25,7 @@ provider:
 functions:
 
   register:
-    handler: register.handler
+    handler: auth/register.handler
     events:
       - http:
           path: auth/register
@@ -33,11 +33,43 @@ functions:
           cors: true
 
   login:
-    handler: login.handler
+    handler: auth/login.handler
     events:
       - http:
           path: auth/login
           method: post
+          cors: true
+
+  ordersCreate:
+    handler: orders/index.create
+    events:
+      - http:
+          path: orders
+          method: post
+          cors: true
+
+  ordersList:
+    handler: orders/index.list
+    events:
+      - http:
+          path: orders
+          method: get
+          cors: true
+
+  ordersGet:
+    handler: orders/index.get
+    events:
+      - http:
+          path: orders/{id}
+          method: get
+          cors: true
+
+  ordersCancel:
+    handler: orders/index.cancel
+    events:
+      - http:
+          path: orders/{id}
+          method: delete
           cors: true
 
 resources:
