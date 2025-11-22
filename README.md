@@ -110,21 +110,50 @@ Response 201:
 { "message": "Worker created", "userId": "WRK-xxxx", "role": "kitchen" }
 ```
 
+
 ### 4. POST /admin/menu
-Crear o actualizar plato.
-- Crear (sin dishId):
+Crear o actualizar plato (soporta imagen por URL o base64).
+
+**Crear (sin dishId):**
 ```json
-{ "tenantId":"t1", "role":"admin", "name":"Burger", "price":12.5, "description":"Carne y queso", "available":true }
+{
+	"tenantId": "t1",
+	"role": "admin",
+	"name": "Burger",
+	"price": 12.5,
+	"description": "Carne y queso",
+	"available": true,
+	// Opción 1: imagen por URL
+	"imageUrl": "https://mi-cdn.com/burger.jpg"
+	// Opción 2: imagen en base64 (data URI o solo base64)
+	// "imageBase64": "data:image/png;base64,iVBORw0KGgoAAAANS..."
+}
 ```
-Response 201:
+**Notas:**
+- Si envías `imageUrl`, se guarda tal cual.
+- Si envías `imageBase64`, la imagen se sube a S3 y se genera una URL pública (`imageUrl`).
+- Si envías ambos, se prioriza `imageBase64`.
+
+**Response 201:**
 ```json
 { "message": "Dish created", "dishId": "DISH-uuid", "imageUrl": "https://..." }
 ```
-- Actualizar (con dishId):
+
+**Actualizar (con dishId):**
 ```json
-{ "tenantId":"t1", "role":"admin", "dishId":"DISH-uuid", "price":13.0, "available":false }
+{
+	"tenantId": "t1",
+	"role": "admin",
+	"dishId": "DISH-uuid",
+	"price": 13.0,
+	"available": false,
+	// Puedes actualizar imagen igual que en creación
+	"imageUrl": "https://mi-cdn.com/burger2.jpg"
+	// o
+	// "imageBase64": "..."
+}
 ```
-Response 200:
+**Response 200:**
 ```json
 { "message": "Dish updated", "dishId": "DISH-uuid", "imageUrl": "https://..." }
 ```
@@ -281,5 +310,28 @@ serverless deploy --stage dev
 - Seguridad: endpoints admin dependen de rol enviado en body; ideal mover esa verificación al token/JWT authorizer.
 
 ## ✅ Resumen rápido
+# ✅ Resumen rápido
 Esta API soporta registro/login multi-tenant, gestión de workers, gestión de platos, creación y ciclo de vida de órdenes con asignación automática de cocina y delivery, y logging auditable en S3.
+
+---
+
+## ℹ️ Guía para el Frontend: Paginación
+
+Todos los endpoints de listado (`/menu`, `/kitchens`, `/orders`) soportan paginación con los parámetros opcionales:
+
+- `limit`: cuántos ítems traer por página (default 20, máximo 100)
+- `lastKey`: token de paginación (devuelto como `nextKey` en la respuesta anterior)
+
+**Cómo paginar desde el front:**
+1. Haz la primera petición con `limit` (ej: `/menu?tenantId=t1&limit=10`).
+2. Si la respuesta trae `nextKey`, guarda ese valor.
+3. Para la siguiente página, haz la petición agregando `lastKey=<valor_de_nextKey>`.
+4. Repite hasta que la respuesta no traiga `nextKey` (fin de los datos).
+
+**Ejemplo flujo:**
+1. `GET /orders?limit=10` → respuesta: `{ orders: [...], nextKey: "abc..." }`
+2. `GET /orders?limit=10&lastKey=abc...` → respuesta: `{ orders: [...], nextKey: "def..." }`
+3. ...
+
+El campo `nextKey` es un string seguro para URL (base64). No lo modifiques, solo pásalo tal cual en la siguiente petición.
 
