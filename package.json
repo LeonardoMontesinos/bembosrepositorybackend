@@ -1,0 +1,15 @@
+{
+  "name": "backend-bembos",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "generate-openapi": "serverless openapi generate",
+    "deploy": "serverless deploy"
+  },
+  "devDependencies": {
+    "serverless": "^3.40.0",
+    "serverless-openapi-documentation": "^1.0.0",
+    "serverless-plugin-scripts": "^0.11.0",
+    "serverless-dotenv-plugin": "^3.9.0"
+  }
+}
