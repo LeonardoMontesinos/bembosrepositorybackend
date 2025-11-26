@@ -261,9 +261,20 @@ exports.handler = async (event) => {
       }
     }
 
-    // Retornar política IAM con contexto
+    // Preparar contexto seguro: API Gateway/Lambda authorizer solo acepta strings
+    const safeContext = {};
+    for (const key of Object.keys(payload)) {
+      // Convertir todos los valores a string
+      try {
+        safeContext[key] = String(payload[key]);
+      } catch (e) {
+        safeContext[key] = "" + payload[key];
+      }
+    }
+
+    // Retornar política IAM con contexto (valores como strings)
     return {
-      principalId: payload.userId,
+      principalId: String(payload.userId),
       policyDocument: {
         Version: "2012-10-17",
         Statement: [
@@ -274,7 +285,7 @@ exports.handler = async (event) => {
           },
         ],
       },
-      context: payload,
+      context: safeContext,
     };
 
   } catch (err) {
