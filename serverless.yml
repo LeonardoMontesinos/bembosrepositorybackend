@@ -105,12 +105,24 @@ functions:
               type: request
               identitySource: method.request.header.Authorization
 
+  adminCreateMenu:
+    handler: admin/createMenu.handler
+    events:
+      - http:
+          path: admin/menu
+          method: post
+          cors: true
+          authorizer:
+              name: authorizer
+              type: request
+              identitySource: method.request.header.Authorization
+
   adminUpdateMenu:
     handler: admin/updateMenu.handler
     events:
       - http:
           path: admin/menu
-          method: post
+          method: patch
           cors: true
           authorizer:
               name: authorizer

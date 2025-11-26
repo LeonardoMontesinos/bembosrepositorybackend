@@ -1,7 +1,7 @@
 const { randomBytes } = require("crypto");
 const { v4: uuidv4 } = require("uuid");
 const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
-const { DynamoDBClient, PutItemCommand, UpdateItemCommand, QueryCommand } = require("@aws-sdk/client-dynamodb");
+const { DynamoDBClient, PutItemCommand } = require("@aws-sdk/client-dynamodb");
 
 const s3 = new S3Client({});
 const dynamo = new DynamoDBClient({});
@@ -61,11 +61,11 @@ async function uploadBase64ToS3(base64OrDataUri, tenantId, filename, contentType
 exports.handler = async (event) => {
   try {
     const body = JSON.parse(event.body || "{}");
-  const { tenantId, dishId, name, description, price, available, role, imageUrl, imageBase64, imageFilename, imageContentType } = body;
+    const { tenantId, name, description, price, available, role, imageUrl, imageBase64, imageFilename, imageContentType } = body;
 
-    // Campos mínimos
-    if (!tenantId || (!dishId && !name) || (price === undefined || price === null)) {
-      return json(400, { message: "Missing fields: tenantId, name (for create) and price are required" }, event);
+    // Campos mínimos para crear
+    if (!tenantId || !name || (price === undefined || price === null)) {
+      return json(400, { message: "Missing fields: tenantId, name and price are required" }, event);
     }
 
     // Role: por seguridad, este endpoint es para admin. Requerir role === 'admin' si se provee.
@@ -73,9 +73,9 @@ exports.handler = async (event) => {
       return json(403, { message: "Forbidden: admin role required" }, event);
     }
 
-  const normalizedName = name ? String(name).trim() : null;
-  const numericPrice = Number(price);
-  if (!dishId && !normalizedName) return json(400, { message: "Invalid name" }, event);
+    const normalizedName = String(name).trim();
+    const numericPrice = Number(price);
+    if (!normalizedName) return json(400, { message: "Invalid name" }, event);
     if (Number.isNaN(numericPrice) || numericPrice < 0) return json(400, { message: "Invalid price" }, event);
 
     let finalImageUrl = null;
@@ -94,62 +94,39 @@ exports.handler = async (event) => {
     }
 
     const now = new Date().toISOString();
+    const newDishId = generateDishId();
 
-    // Create vs Update handling
-    // This handler is intended for updates only (PATCH). For creating new dishes use POST /admin/menu (admin/createMenu.handler).
-    if (!dishId) {
-      return json(400, { message: "Missing dishId for update. Use POST to create new dishes." }, event);
-    }
-
-    // Update existing dish (upsert fields)
-    const updateExprParts = ["updatedAt = :updatedAt", "price = :price"];
-    const exprAttrValues = {
-      ":updatedAt": { S: now },
-      ":price": { N: String(numericPrice) },
+    const item = {
+      tenantId: { S: tenantId },
+      dishId: { S: newDishId },
+      name: { S: normalizedName },
+      price: { N: String(numericPrice) },
+      available: { BOOL: available === undefined ? true : !!available },
+      createdAt: { S: now },
+      updatedAt: { S: now },
     };
-    const exprAttrNames = {};
-
-    if (normalizedName) {
-      updateExprParts.push("#name = :name");
-      exprAttrValues[":name"] = { S: normalizedName };
-      exprAttrNames["#name"] = "name";
-    }
-    if (description !== undefined) {
-      updateExprParts.push("description = :description");
-      exprAttrValues[":description"] = { S: String(description) };
-    }
-    if (available !== undefined) {
-      updateExprParts.push("available = :available");
-      exprAttrValues[":available"] = { BOOL: !!available };
-    }
-    if (finalImageUrl) {
-      updateExprParts.push("imageUrl = :imageUrl");
-      exprAttrValues[":imageUrl"] = { S: finalImageUrl };
-    }
-
-    const UpdateExpression = "SET " + updateExprParts.join(", ");
+    if (description) item.description = { S: String(description) };
+    if (finalImageUrl) item.imageUrl = { S: finalImageUrl };
 
     try {
       await dynamo.send(
-        new UpdateItemCommand({
+        new PutItemCommand({
           TableName: MENU_TABLE,
-          Key: { tenantId: { S: tenantId }, dishId: { S: dishId } },
-          UpdateExpression,
-          ExpressionAttributeValues: exprAttrValues,
-          ExpressionAttributeNames: Object.keys(exprAttrNames).length ? exprAttrNames : undefined,
-          ConditionExpression: "attribute_exists(dishId)",
+          Item: item,
+          ConditionExpression: "attribute_not_exists(dishId)",
         })
       );
     } catch (err) {
       if (err.name === "ConditionalCheckFailedException") {
-        return json(404, { message: "Dish not found" }, event);
+        return json(409, { message: "Dish already exists" }, event);
       }
-      console.error("Dynamo error (update dish):", err);
-      return json(500, { message: "Failed to update dish" }, event);
+      console.error("Dynamo error (create dish):", err);
+      return json(500, { message: "Failed to create dish" }, event);
     }
-    return json(200, { message: "Dish updated", dishId, imageUrl: finalImageUrl }, event);
+
+    return json(201, { message: "Dish created", dishId: newDishId, imageUrl: finalImageUrl }, event);
   } catch (err) {
-    console.error("UPDATE MENU ERROR:", err);
+    console.error("CREATE MENU ERROR:", err);
     return json(500, { message: "Server error", error: err.message }, event);
   }
 };
