@@ -140,7 +140,7 @@ exports.handler = async (event) => {
       throw putError;
     }
 
-    return json(201, { message: "User created", userId }, event);
+    return json(201, { message: "User created", userId, username: normalizedUsername, role: normalizedRole }, event);
 
   } catch (err) {
     console.error("REGISTER ERROR:", err);

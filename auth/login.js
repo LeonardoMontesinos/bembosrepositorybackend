@@ -164,11 +164,12 @@ exports.handler = async (event) => {
       userId: user.userId.S,
       role: user.role.S,
       email: user.email.S,
+      username: user.username && user.username.S ? user.username.S : undefined,
     };
 
     const token = signJWT(payload, process.env.JWT_SECRET);
 
-    return json(200, { token }, event);
+    return json(200, { token, userId: user.userId.S, role: user.role.S, username: user.username && user.username.S ? user.username.S : undefined, email: user.email.S }, event);
 
   } catch (err) {
     console.error("LOGIN ERROR:", err);

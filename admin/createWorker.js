@@ -162,7 +162,7 @@ exports.handler = async (event) => {
 			throw putError;
 		}
 
-		return json(201, { message: "Worker created", userId, role: normalizedRole }, event);
+		return json(201, { message: "Worker created", userId, role: normalizedRole, username: normalizedUsername }, event);
 	} catch (err) {
 		console.error("CREATE WORKER ERROR:", err);
 		return json(500, { message: "Server error", error: err.message }, event);
