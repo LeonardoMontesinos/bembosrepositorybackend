@@ -13,11 +13,13 @@ provider:
   timeout: 29
   memorySize: 1024
   iam:
-    role: arn:aws:iam::438511508379:role/LabRole
+    role: arn:aws:iam::${env:USER_ID}:role/LabRole
 
   environment:
+    USER_ID: ${env:USER_ID}
     USER_TABLE: UserTable-${sls:stage}
     ORDERS_TABLE: OrdersTable-${sls:stage}
+    # Cambiar el nombre del bucket si es necesario (debe ser único globalmente)
     ORDERS_BUCKET: restaurant-orders-dashboard-${sls:stage}
     MENU_TABLE: MenuTable-${sls:stage}
     MENU_BUCKET: menu-bucket-${sls:stage}

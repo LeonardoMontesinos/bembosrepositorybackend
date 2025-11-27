@@ -104,6 +104,107 @@ Las siguientes variables aparecen en `serverless.yml` y controlan nombres de tab
 - `MENU_BUCKET` → bucket para menús
 - `JWT_SECRET`, `ALLOWED_ORIGINS`, etc.
 
+## Despliegue en una máquina compartida (VM / EC2)
+
+Si vas a usar una máquina virtual compartida para ejecutar los comandos de despliegue (por ejemplo una EC2 que usa varios devs o una máquina de CI privada), sigue estos pasos y recomendaciones.
+
+- Clona el repo en la VM y entra en la carpeta:
+
+```bash
+git clone <tu-repo-url> ~/backend-bembos
+cd ~/backend-bembos
+```
+
+- Crea un archivo `.env` en la raíz del proyecto con las variables necesarias. El plugin `serverless-dotenv-plugin` cargará este archivo cuando ejecutes `serverless`.
+
+Ejemplo mínimo de `.env`:
+
+```env
+JWT_SECRET=valor-muy-secreto
+ALLOWED_ORIGINS=*
+CORS_ALLOW_CREDENTIALS=false
+# Opcional: AWS variables si no las configuras con aws cli
+# AWS_ACCESS_KEY_ID=...
+# AWS_SECRET_ACCESS_KEY=...
+```
+
+- Asegura las credenciales AWS en la VM (elige uno de los métodos):
+
+	- Exportar en la sesión (temporal):
+
+		```bash
+		export AWS_ACCESS_KEY_ID=...
+		export AWS_SECRET_ACCESS_KEY=...
+		export AWS_REGION=us-east-1
+		```
+
+	- O usar `aws configure` para guardarlas en `~/.aws/credentials` (recomendado para una VM que usa un solo account):
+
+		```bash
+		aws configure
+		```
+
+	- En entornos compartidos considera usar perfiles (`AWS_PROFILE`) o roles de instancia (EC2 IAM Role) en lugar de dejar las keys en texto.
+
+- Instala dependencias y comprueba variables antes de desplegar:
+
+```bash
+npm install
+npm run check-env        # valida que JWT_SECRET (y otros requeridos) existan
+npm run deploy:checked -- --stage dev
+```
+
+`npm run deploy:checked` ejecuta `check-env` y, si todo está ok, hace `serverless deploy`. Si faltan variables, aborta con un mensaje claro.
+
+Nota: `serverless-dotenv-plugin` solo actúa cuando usas Serverless CLI (`sls`/`serverless`). Si ejecutas los ficheros Node directamente para pruebas, debes cargar `.env` en esa ejecución (por ejemplo con `node -r dotenv/config script.js`).
+
+### Ejecutar localmente en la VM (sin desplegar)
+
+Este proyecto está pensado para Serverless (Lambda). Si quieres ejecutar pruebas locales o scripts que usan `process.env`, utiliza `dotenv` en la ejecución:
+
+```bash
+# instalar dotenv una vez si te hace falta
+npm install dotenv
+
+# ejecutar un script cargando .env antes
+node -r dotenv/config path/to/script.js
+```
+
+Ejemplo: si ejecutaras una utilidad `scripts/foo.js` que requiere `JWT_SECRET`, haz:
+
+```bash
+node -r dotenv/config scripts/foo.js
+```
+
+### Seguridad y buenas prácticas para máquinas compartidas
+
+- No comites `.env` (ya está en `.gitignore`).
+- Para entornos compartidos preferible usar IAM Roles de instancia (EC2) o variables en el sistema de CI con permisos limitados.
+- Limita el acceso al fichero `.env` (`chmod 600 .env`) y evita claves en logs.
+
+## Script de despliegue automatizado (`scripts/deploy.sh`)
+
+He añadido un script `scripts/deploy.sh` que realiza los pasos necesarios para generar la spec OpenAPI, ejecutar el post-procesado y desplegar con Serverless. El script acepta un único parámetro: el `stage`.
+
+Uso:
+
+```bash
+chmod +x ./scripts/deploy.sh
+./scripts/deploy.sh dev
+```
+
+Qué hace el script:
+- Comprueba que exista/valide el `.env` usando `npm run check-env`.
+- Ejecuta `npx serverless openapi generate` y trata de producir `openapi.json` (si no lo genera intenta otras opciones).
+- Ejecuta `node ./scripts/postprocess-openapi.js` si existe.
+- Lanza `npx serverless deploy --stage <stage>`.
+- Si `serverless.yml` contiene `runtime: nodejs22.x` (que puede no estar soportado por la versión local de Serverless), el script crea una copia temporal cambiando a `nodejs20.x` y usa esa copia para la generación y el deploy (no modifica tu `serverless.yml` original).
+
+Si algo falla (por ejemplo `openapi.json` no se genera), el script abortará y mostrará un mensaje para intervenir manualmente.
+
+Si querés que lo ejecute por vos o que lo haga ejecutable automáticamente, decímelo y lo hago.
+
+
 ## Dónde mirar en el código
 - `auth/` → `register.js`, `login.js` (autenticación)
 - `orders/` → `create.js`, `get.js`, `list.js`, `updateStatus.js` (lógica de órdenes)
