@@ -3,8 +3,7 @@ service: bemmbos
 
 plugins:
   - serverless-dotenv-plugin
-  - serverless-openapi-documentation
-  - serverless-plugin-scripts
+#  - serverless-plugin-scripts
 
 provider:
   name: aws
@@ -13,140 +12,35 @@ provider:
   timeout: 29
   memorySize: 1024
   iam:
-    role: arn:aws:iam::${env:USER_ID}:role/LabRole
+    role: arn:aws:iam::131515946730:role/LabRole
 
   environment:
-    USER_ID: ${env:USER_ID}
     USER_TABLE: UserTable-${sls:stage}
     ORDERS_TABLE: OrdersTable-${sls:stage}
-    # Cambiar el nombre del bucket si es necesario (debe ser único globalmente)
     ORDERS_BUCKET: restaurant-orders-dashboard-${sls:stage}
     MENU_TABLE: MenuTable-${sls:stage}
     MENU_BUCKET: menu-bucket-${sls:stage}
-    JWT_SECRET: ${env:JWT_SECRET}
+    JWT_SECRET: 1234
     ALLOWED_ORIGINS: ${env:ALLOWED_ORIGINS, '*'}
     CORS_ALLOW_CREDENTIALS: ${env:CORS_ALLOW_CREDENTIALS, 'false'}
     WS_STAGE: ${sls:stage}
 
 package:
   include:
-    - openapi.json
+    - scripts/**
+  exclude:
+    - openapi.json  # aseguramos que ya no se incluya
 
-custom:
-  documentation:
-    api:
-      info:
-        version: "1.0.0"
-        title: "Bembos API"
-        description: "Documentación automática generada desde serverless.yml"
-    # JSON Schema models used by the OpenAPI generator
-    models:
-      - name: RegisterRequest
-        contentType: application/json
-        schema:
-          $schema: 'http://json-schema.org/draft-07/schema#'
-          type: object
-          properties:
-            email:
-              type: string
-            username:
-              type: string
-            password:
-              type: string
-            tenantId:
-              type: string
-          required: [email, password]
-      - name: LoginRequest
-        contentType: application/json
-        schema:
-          $schema: 'http://json-schema.org/draft-07/schema#'
-          type: object
-          properties:
-            email:
-              type: string
-            password:
-              type: string
-          required: [email, password]
-      - name: UserResponse
-        contentType: application/json
-        schema:
-          $schema: 'http://json-schema.org/draft-07/schema#'
-          type: object
-          properties:
-            userId: { type: string }
-            username: { type: string }
-            email: { type: string }
-            role: { type: string }
-      - name: TokenResponse
-        contentType: application/json
-        schema:
-          $schema: 'http://json-schema.org/draft-07/schema#'
-          type: object
-          properties:
-            token: { type: string }
-      - name: CreateOrderRequest
-        contentType: application/json
-        schema:
-          $schema: 'http://json-schema.org/draft-07/schema#'
-          type: object
-          properties:
-            tenantId: { type: string }
-            items:
-              type: array
-              items:
-                type: object
-                properties:
-                  dishId: { type: string }
-                  quantity: { type: integer }
-          required: [items]
-      - name: OrderResponse
-        contentType: application/json
-        schema:
-          $schema: 'http://json-schema.org/draft-07/schema#'
-          type: object
-          properties:
-            orderId: { type: string }
-            status: { type: string }
-            items:
-              type: array
-              items:
-                type: object
-      - name: UpdateStatusRequest
-        contentType: application/json
-        schema:
-          $schema: 'http://json-schema.org/draft-07/schema#'
-          type: object
-          properties:
-            status: { type: string }
-          required: [status]
-  openapi:
-    output: openapi.json
-  scripts:
-    hooks:
-      # generate OpenAPI spec automatically before deploy
-      before:deploy:deploy: "npx serverless openapi generate && node ./scripts/postprocess-openapi.js"
+custom: {}
+#  scripts:
+#    hooks:
+      # ya no generamos swagger
+#      before:deploy:deploy: ""
 
 functions:
 
   register:
     handler: auth/register.handler
-    documentation:
-      summary: "Register user"
-      description: "Crea un nuevo usuario"
-      requestBody:
-        description: "Datos para registro"
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/RegisterRequest'
-      responses:
-        '201':
-          description: Created
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/UserResponse'
     events:
       - http:
           path: auth/register
@@ -155,23 +49,6 @@ functions:
 
   login:
     handler: auth/login.handler
-    documentation:
-      summary: "Login"
-      description: "Obtiene token de autenticación"
-      requestBody:
-        description: "Credenciales"
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/LoginRequest'
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/TokenResponse'
     events:
       - http:
           path: auth/login
@@ -183,109 +60,54 @@ functions:
 
   ordersCreate:
     handler: orders/index.create
-    documentation:
-      summary: "Create order"
-      description: "Crea una nueva orden"
-      requestBody:
-        description: "Datos de la orden"
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/CreateOrderRequest'
-      responses:
-        '201':
-          description: Created
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OrderResponse'
     events:
       - http:
           path: orders
           method: post
           cors: true
           authorizer:
-            name: authorizer
-            type: request
-            identitySource: method.request.header.Authorization
+              name: authorizer
+              type: request
+              identitySource: method.request.header.Authorization
 
   ordersList:
     handler: orders/index.list
-    documentation:
-      summary: "List orders"
-      description: "Lista órdenes del tenant"
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/OrderResponse'
     events:
       - http:
           path: orders
           method: get
           cors: true
           authorizer:
-            name: authorizer
-            type: request
-            identitySource: method.request.header.Authorization
+              name: authorizer
+              type: request
+              identitySource: method.request.header.Authorization
 
   ordersGet:
     handler: orders/index.get
-    documentation:
-      summary: "Get order"
-      description: "Obtiene una orden por id"
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/OrderResponse'
     events:
       - http:
           path: orders/{id}
           method: get
           cors: true
           authorizer:
-            name: authorizer
-            type: request
-            identitySource: method.request.header.Authorization
+              name: authorizer
+              type: request
+              identitySource: method.request.header.Authorization
 
   ordersUpdateStatus:
     handler: orders/index.updateStatus
-    documentation:
-      summary: "Update order status"
-      description: "Actualiza el estado de una orden"
-      requestBody:
-        description: "Nuevo estado"
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/UpdateStatusRequest'
-      responses:
-        '200':
-          description: OK
     events:
       - http:
           path: orders/{id}/status
           method: patch
           cors: true
           authorizer:
-            name: authorizer
-            type: request
-            identitySource: method.request.header.Authorization
+              name: authorizer
+              type: request
+              identitySource: method.request.header.Authorization
 
   adminCreateWorker:
     handler: admin/createWorker.handler
-    documentation:
-      summary: "Create worker"
-      description: "Crea un trabajador"
     events:
       - http:
           path: admin/workers
@@ -298,9 +120,6 @@ functions:
 
   adminCreateMenu:
     handler: admin/createMenu.handler
-    documentation:
-      summary: "Create menu item"
-      description: "Añade un plato al menú"
     events:
       - http:
           path: admin/menu
@@ -313,9 +132,6 @@ functions:
 
   adminUpdateMenu:
     handler: admin/updateMenu.handler
-    documentation:
-      summary: "Update menu"
-      description: "Actualiza elementos del menú"
     events:
       - http:
           path: admin/menu
@@ -328,61 +144,33 @@ functions:
 
   createKitchen:
     handler: kitchen/createKitchen.handler
-    documentation:
-      summary: "Create kitchen"
-      description: "Crea una cocina"
     events:
       - http:
           path: kitchens
           method: post
           cors: true
           authorizer:
-            name: authorizer
-            type: request
-            identitySource: method.request.header.Authorization
+              name: authorizer
+              type: request
+              identitySource: method.request.header.Authorization
 
   listKitchens:
     handler: kitchen/listKitchens.handler
-    documentation:
-      summary: "List kitchens"
-      description: "Lista cocinas disponibles"
     events:
       - http:
           path: kitchens
           method: get
           cors: true
           authorizer:
-            name: authorizer
-            type: request
-            identitySource: method.request.header.Authorization
+              name: authorizer
+              type: request
+              identitySource: method.request.header.Authorization
 
   getMenu:
     handler: kitchen/getMenu.handler
-    documentation:
-      summary: "Get menu"
-      description: "Obtiene el menú público"
     events:
       - http:
           path: menu
-          method: get
-          cors: true
-          # authorizer:
-          #     name: authorizer
-          #     type: request
-          #     identitySource: method.request.header.Authorization
-
-  docs:
-    handler: docs/index.handler
-    package:
-      include:
-        - openapi.json
-    events:
-      - http:
-          path: docs
-          method: get
-          cors: true
-      - http:
-          path: openapi.json
           method: get
           cors: true
 
