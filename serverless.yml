@@ -161,11 +161,7 @@ functions:
           path: kitchens
           method: get
           cors: true
-          authorizer:
-              name: authorizer
-              type: request
-              identitySource: method.request.header.Authorization
-
+          
   getMenu:
     handler: kitchen/getMenu.handler
     events:
