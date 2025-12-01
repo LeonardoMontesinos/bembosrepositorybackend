@@ -1,62 +1,114 @@
-const { DynamoDBClient, QueryCommand } = require('@aws-sdk/client-dynamodb');
-const { json } = require('../http');
+async function handleCreate(event, user) {
+  const data = parseBody(event);
+  const tenantId = user.tenantId || "DEFAULT";
+  const orderId = generateOrderId();
+  const now = new Date().toISOString();
+  const createdBy = user.sub || 'anonymous';
 
-const dynamo = new DynamoDBClient({});
-const KITCHEN_TABLE = process.env.KITCHEN_TABLE || `KitchenTable-${process.env.SLS_STAGE || 'dev'}`;
+  // Items
+  const items = Array.isArray(data.items) ? data.items : [];
 
-exports.handler = async (event) => {
-  try {
-    // Prefer tenantId from authorizer (protected endpoint). Fallback to query param if not present.
-    let tenantId = null;
-    if (event && event.requestContext && event.requestContext.authorizer) {
-      const auth = event.requestContext.authorizer;
-      const claims = auth.claims || auth;
-      tenantId = auth.tenantId || (claims && claims.tenantId) || null;
-    }
-    const qs = event.queryStringParameters || {};
-    if (!tenantId) tenantId = qs.tenantId || null;
-    if (!tenantId) {
-      return json(400, { message: 'tenantId required (authorizer or query param)' }, event);
-    }
+  // Calcular total automáticamente
+  const total = items.reduce((acc, item) => {
+    const price = Number(item.price) || 0;
+    const qty = Number(item.quantity) || 1;
+    return acc + price * qty;
+  }, 0);
 
-    // Paginación: limit y lastKey
-    // Paginación: limit and lastKey — `qs` already defined above
-    const limit = qs.limit ? Math.max(1, Math.min(100, parseInt(qs.limit))) : 20;
-    let ExclusiveStartKey = undefined;
-    if (qs.lastKey) {
-      try {
-        ExclusiveStartKey = JSON.parse(Buffer.from(qs.lastKey, 'base64').toString('utf8'));
-      } catch (e) {
-        return json(400, { message: 'Invalid lastKey param' }, event);
-      }
-    }
+  // Tipo: DELIVERY o TIENDA
+  const orderType = (data.orderType || 'TIENDA').toUpperCase();
 
-    const params = {
-      TableName: KITCHEN_TABLE,
-      KeyConditionExpression: 'tenantId = :t',
-      ExpressionAttributeValues: { ':t': { S: tenantId } },
-      Limit: limit,
+  // Details
+  let details = null;
+  if (orderType === 'DELIVERY') {
+    details = {
+      direccion: data.direccion || "SIN_DIRECCION"
     };
-    if (ExclusiveStartKey) params.ExclusiveStartKey = ExclusiveStartKey;
-
-    const result = await dynamo.send(new QueryCommand(params));
-
-    const kitchens = (result.Items || []).map(it => ({
-      kitchenId: it.kitchenId.S,
-      name: it.name?.S,
-      maxCooking: Number(it.maxCooking?.N || 0),
-      currentCooking: Number(it.currentCooking?.N || 0),
-      active: !!it.active?.BOOL,
-    }));
-
-    let nextKey = null;
-    if (result.LastEvaluatedKey) {
-      nextKey = Buffer.from(JSON.stringify(result.LastEvaluatedKey)).toString('base64');
-    }
-
-    return json(200, { kitchens, nextKey }, event);
-  } catch (err) {
-    console.error('LIST KITCHENS ERROR:', err);
-    return json(500, { message: 'Server error', error: err.message }, event);
   }
-};
+
+  // Cocina elegida por el cliente
+  const kitchenId = data.kitchenId || null;
+
+  // Crear item en Dynamo
+  const item = {
+    PK: { S: `TENANT#${tenantId}` },
+    SK: { S: `ORDER#${orderId}` },
+    createdAt: { S: now },
+    updatedAt: { S: now },
+    createdBy: { S: createdBy },
+
+    // Estado inicial: CREATED (Step Function cambiará luego)
+    status: { S: 'CREATED' },
+
+    // Tipo de entrega
+    orderType: { S: orderType },
+    details: { S: JSON.stringify(details) },
+
+    items: { S: JSON.stringify(items) },
+    total: { N: total.toString() },
+
+    // Cocina elegida por el usuario
+    kitchenId: kitchenId ? { S: kitchenId } : { NULL: true }
+  };
+
+  // Guardar la orden
+  await dynamo.send(
+    new PutItemCommand({
+      TableName: TABLE_NAME,
+      Item: item,
+    })
+  );
+
+  // Copia en S3
+  const s3Body = JSON.stringify({
+    orderId,
+    tenantId,
+    createdAt: now,
+    createdBy,
+    status: 'CREATED',
+    kitchenId,
+    orderType,
+    details
+  });
+
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: BUCKET_NAME,
+      Key: `${orderId}.json`,
+      Body: s3Body,
+      ContentType: 'application/json',
+    })
+  );
+
+  // Log
+  await logOrderEvent({
+    orderId,
+    tenantId,
+    userId: createdBy,
+    eventType: 'CREATE',
+    payload: {
+      status: 'CREATED',
+      kitchenId,
+      orderType,
+      details
+    }
+  });
+
+  // Respuesta final
+  return response(201, {
+    message: 'Order created successfully',
+    order: {
+      orderId,
+      tenantId,
+      status: 'CREATED',
+      kitchenId,
+      items,
+      total,
+      orderType,
+      details,
+      createdAt: now,
+      updatedAt: now,
+      createdBy,
+    },
+  });
+}
