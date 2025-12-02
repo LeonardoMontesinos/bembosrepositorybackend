@@ -1,41 +1,49 @@
-const { QueryCommand, UpdateItemCommand } = require("@aws-sdk/client-dynamodb");
-const { DynamoDBClient, QueryCommand: KitchenQuery } = require("@aws-sdk/client-dynamodb");
-const { dynamo, TABLE_NAME } = require("./db");
+const { DynamoDBClient, QueryCommand, UpdateItemCommand } = require("@aws-sdk/client-dynamodb");
+const { dynamo, TABLE_NAME } = require("./db"); // Asumo que ./db exporta el cliente configurado
 const { response, logOrderEvent } = require("./utils");
+const { publishEvent } = require("../utils/events"); // <--- NUEVO: Helper de eventos
+
 const userDynamo = new DynamoDBClient({});
-const KITCHEN_TABLE = process.env.KITCHEN_TABLE || `KitchenTable-${process.env.SLS_STAGE || 'dev'}`;
 const USER_TABLE = process.env.USER_TABLE || 'UserTable';
 
 /**
- * Body: { status: 'CANCELLED' | 'COOKING' | 'SENDED' }
- * Rules:
- * - CANCELLED: allowed only if current status === 'CREATED' and requester is creator or OWNER
- * - COOKING: allowed only for OWNER and if current status === 'CREATED'
- * - SENDED: allowed only for OWNER and if current status === 'COOKING'
+ * Body: { status: 'CANCELLED' | 'COOKING' | 'SENDED' | 'DELIVERED' }
+ * 
+ * Flujo nuevo con Eventos:
+ * 1. Valida permisos y transiciones.
+ * 2. Actualiza DynamoDB.
+ * 3. Si el pedido sale de cocina -> Publica 'KitchenSpaceAvailable' (Reactiva la cola SQS).
+ * 4. Publica 'OrderStatusUpdated' (Actualiza WebSockets).
  */
 async function handleUpdateStatus(event, user) {
   const tenantId = user.tenantId || 'DEFAULT';
   const role = (user.role || 'USER').toUpperCase();
   const createdBy = user.sub || 'anonymous';
+  
+  // Obtener ID del path parameters
   const path = event.path || '';
-  const orderId = path.split('/')[2];
+  // Ajuste: Dependiendo de si usas serverless-offline o AWS real, el path parameter suele venir en event.pathParameters
+  const orderId = event.pathParameters ? event.pathParameters.id : path.split('/')[2];
 
   const body = event.body ? JSON.parse(event.body) : {};
   const desired = (body.status || '').toString().toUpperCase();
 
-  const allowedStatuses = ['CREATED', 'COOKING', 'SENDED', 'DELIVERED', 'CANCELLED'];
+  // Estados permitidos
+  // Nota: 'PREPARING' es sinónimo de 'COOKING' en el nuevo flujo, aceptamos ambos por compatibilidad
+  const allowedStatuses = ['CREATED', 'PREPARING', 'COOKING', 'SENDED', 'DELIVERED', 'CANCELLED', 'QUEUED'];
+  
   if (!allowedStatuses.includes(desired)) {
-    return response(400, { message: 'Invalid status' });
+    return response(400, { message: Invalid status. Allowed: ${allowedStatuses.join(', ')} });
   }
 
-  // Get current order
+  // 1. Obtener el pedido actual
   const result = await dynamo.send(
     new QueryCommand({
       TableName: TABLE_NAME,
       KeyConditionExpression: 'PK = :pk AND SK = :sk',
       ExpressionAttributeValues: {
-        ':pk': { S: `TENANT#${tenantId}` },
-        ':sk': { S: `ORDER#${orderId}` },
+        ':pk': { S: TENANT#${tenantId} },
+        ':sk': { S: ORDER#${orderId} },
       },
     })
   );
@@ -46,27 +54,32 @@ async function handleUpdateStatus(event, user) {
 
   const order = result.Items[0];
   const current = (order.status && order.status.S) || 'CREATED';
+  const currentKitchenId = order.kitchenId ? order.kitchenId.S : null;
 
-  // Authorization and transition rules
+  // 2. Reglas de Transición y Autorización
   if (desired === 'CANCELLED') {
-    if (current !== 'CREATED') {
-      return response(400, { message: 'Order cannot be cancelled at this stage' });
+    // Solo se puede cancelar si no ha sido enviado aún
+    if (['SENDED', 'DELIVERED'].includes(current)) {
+      return response(400, { message: 'Cannot cancel an order that has already been sent' });
     }
-    if (role !== 'OWNER' && order.createdBy.S !== createdBy) {
+    if (role !== 'OWNER' && role !== 'ADMIN' && order.createdBy.S !== createdBy) {
       return response(403, { message: 'Forbidden' });
     }
-  } else if (desired === 'COOKING') {
-    if (role !== 'OWNER') return response(403, { message: 'Only OWNER can set COOKING' });
-    if (current !== 'CREATED') return response(400, { message: 'Can only set COOKING from CREATED' });
-  } else if (desired === 'SENDED') {
-    if (role !== 'OWNER') return response(403, { message: 'Only OWNER can set SENDED' });
-    if (current !== 'COOKING') return response(400, { message: 'Can only set SENDED from COOKING' });
-  } else if (desired === 'DELIVERED') {
-    // Delivered can be set only when order was already SENDED. Allowed by OWNER or delivery role.
+  } 
+  else if (desired === 'COOKING' || desired === 'PREPARING') {
+    // Asignación manual o inicio de cocina
+    if (role !== 'OWNER' && role !== 'ADMIN' && role !== 'KITCHEN') return response(403, { message: 'Forbidden' });
+  } 
+  else if (desired === 'SENDED' || desired === 'READY') {
+    // Plato listo para salir
+    if (role !== 'OWNER' && role !== 'ADMIN' && role !== 'KITCHEN') return response(403, { message: 'Forbidden' });
+  } 
+  else if (desired === 'DELIVERED') {
     if (current !== 'SENDED') return response(400, { message: 'Can only set DELIVERED from SENDED' });
-    if (role !== 'OWNER' && role !== 'DELIVERY') return response(403, { message: 'Only OWNER or DELIVERY role can set DELIVERED' });
+    if (role !== 'OWNER' && role !== 'ADMIN' && role !== 'DELIVERY') return response(403, { message: 'Only delivery/admin can set DELIVERED' });
   }
 
+  // 3. Preparar Update en DynamoDB
   const now = new Date().toISOString();
   const updateValues = {
     ':s': { S: desired },
@@ -75,97 +88,88 @@ async function handleUpdateStatus(event, user) {
   let updateExpr = 'SET #s = :s, updatedAt = :t';
   const attrNames = { '#s': 'status' };
 
+  // Lógica de Asignación de Repartidor (Si pasa a SENDED)
   let deliveryUserIdAssigned = null;
-  if (desired === 'SENDED') {
-    // Assign any delivery user from TenantRoleIndex GSI
+  if (desired === 'SENDED' && current !== 'SENDED') {
     try {
-      const deliveryRes = await userDynamo.send(new KitchenQuery({
+      // Buscar un usuario con rol 'delivery' en este tenant
+      const deliveryRes = await userDynamo.send(new QueryCommand({
         TableName: USER_TABLE,
         IndexName: 'TenantRoleIndex',
-        KeyConditionExpression: 'tenantId = :tenant AND role = :role',
+        KeyConditionExpression: 'tenantId = :tenant AND #r = :role',
+        ExpressionAttributeNames: { '#r': 'role' }, // 'role' es palabra reservada a veces
         ExpressionAttributeValues: {
           ':tenant': { S: tenantId },
           ':role': { S: 'delivery' },
         },
         Limit: 1,
       }));
+      
       if (deliveryRes.Items && deliveryRes.Items.length > 0) {
         deliveryUserIdAssigned = deliveryRes.Items[0].userId.S;
         updateExpr += ', deliveryUserId = :dId';
         updateValues[':dId'] = { S: deliveryUserIdAssigned };
       }
     } catch (e) {
-      console.warn('Delivery assignment failed:', e.message || e);
+      console.warn('Delivery assignment warning:', e.message);
     }
   }
 
+  // Ejecutar Update
   await dynamo.send(new UpdateItemCommand({
     TableName: TABLE_NAME,
-    Key: { PK: { S: `TENANT#${tenantId}` }, SK: { S: `ORDER#${orderId}` } },
+    Key: { PK: { S: TENANT#${tenantId} }, SK: { S: ORDER#${orderId} } },
     UpdateExpression: updateExpr,
     ExpressionAttributeNames: attrNames,
     ExpressionAttributeValues: updateValues,
   }));
 
-  await logOrderEvent({ orderId, tenantId, userId: createdBy, eventType: 'STATUS_CHANGE', payload: { from: current, to: desired, deliveryUserId: deliveryUserIdAssigned } });
+  // Log de auditoría en S3
+  await logOrderEvent({ 
+    orderId, 
+    tenantId, 
+    userId: createdBy, 
+    eventType: 'STATUS_CHANGE', 
+    payload: { from: current, to: desired, deliveryUserId: deliveryUserIdAssigned } 
+  });
 
-  // If freeing capacity (COOKING -> SENDED/CANCELLED/DELIVERED), attempt assign one CREATED order
-  if (current === 'COOKING' && ['SENDED', 'CANCELLED', 'DELIVERED'].includes(desired)) {
-    try {
-      // List kitchens
-      const kitchensRes = await userDynamo.send(new KitchenQuery({
-        TableName: KITCHEN_TABLE,
-        KeyConditionExpression: 'tenantId = :t',
-        ExpressionAttributeValues: { ':t': { S: tenantId } },
-      }));
-      const kitchens = (kitchensRes.Items || []).map(k => ({
-        kitchenId: k.kitchenId.S,
-        maxCooking: Number(k.maxCooking?.N || 5),
-      }));
-      if (kitchens.length) {
-        const allOrders = await dynamo.send(new QueryCommand({
-          TableName: TABLE_NAME,
-          KeyConditionExpression: 'PK = :pk',
-          ExpressionAttributeValues: { ':pk': { S: `TENANT#${tenantId}` } },
-        }));
-        const cookingCounts = {};
-        const createdOrders = [];
-        for (const o of (allOrders.Items || [])) {
-          const status = o.status?.S;
-          const kId = o.kitchenId?.S;
-          if (status === 'COOKING' && kId) cookingCounts[kId] = (cookingCounts[kId] || 0) + 1;
-          if (status === 'CREATED') createdOrders.push(o);
-        }
-        if (createdOrders.length) {
-          let targetKitchen = null;
-            for (const k of kitchens) {
-              const currentCount = cookingCounts[k.kitchenId] || 0;
-              if (currentCount < k.maxCooking) { targetKitchen = k.kitchenId; break; }
-            }
-          if (targetKitchen) {
-            const orderToAssign = createdOrders[0];
-            const assignOrderId = orderToAssign.SK.S.replace('ORDER#', '');
-            await dynamo.send(new UpdateItemCommand({
-              TableName: TABLE_NAME,
-              Key: { PK: { S: `TENANT#${tenantId}` }, SK: { S: `ORDER#${assignOrderId}` } },
-              UpdateExpression: 'SET #s = :cooking, kitchenId = :kId, updatedAt = :u',
-              ExpressionAttributeNames: { '#s': 'status' },
-              ExpressionAttributeValues: {
-                ':cooking': { S: 'COOKING' },
-                ':kId': { S: targetKitchen },
-                ':u': { S: new Date().toISOString() },
-              },
-            }));
-            await logOrderEvent({ orderId: assignOrderId, tenantId, userId: 'system', eventType: 'AUTO_ASSIGN', payload: { kitchenId: targetKitchen } });
-          }
-        }
-      }
-    } catch (e) {
-      console.warn('Auto reassignment failed:', e.message || e);
+  // --- 🚀 NUEVA LÓGICA EVENT-DRIVEN ---
+
+  // A. Detectar liberación de cocina
+  // Si estaba cocinando (COOKING/PREPARING) y pasa a un estado final o de salida (SENDED/CANCELLED/READY)
+  const cookingStatuses = ['COOKING', 'PREPARING'];
+  const exitStatuses = ['SENDED', 'DELIVERED', 'CANCELLED', 'READY'];
+
+  if (cookingStatuses.includes(current) && exitStatuses.includes(desired)) {
+    if (currentKitchenId) {
+      console.log([UpdateStatus] Order ${orderId} left kitchen ${currentKitchenId}. Emitting space available.);
+      
+      // Publicar evento para que SQS procese el siguiente pedido
+      await publishEvent('bemmbos.kitchen', 'KitchenSpaceAvailable', {
+        tenantId,
+        kitchenId: currentKitchenId,
+        freedByOrderId: orderId,
+        timestamp: now
+      });
     }
   }
 
-  return response(200, { message: `Order ${orderId} status updated to ${desired}`, deliveryUserId: deliveryUserIdAssigned });
+  // B. Notificar a WebSockets (Dashboard)
+  // Esto actualiza las pantallas de cocina/admin en tiempo real
+  await publishEvent('bemmbos.orders', 'OrderStatusUpdated', {
+    tenantId,
+    orderId,
+    oldStatus: current,
+    newStatus: desired,
+    kitchenId: currentKitchenId,
+    updatedAt: now,
+    deliveryUserId: deliveryUserIdAssigned
+  });
+
+  return response(200, { 
+    message: Order ${orderId} status updated to ${desired}, 
+    deliveryUserId: deliveryUserIdAssigned 
+  });
 }
 
 module.exports = { handleUpdateStatus };
