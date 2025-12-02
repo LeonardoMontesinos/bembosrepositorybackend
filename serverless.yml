@@ -6,33 +6,40 @@ plugins:
 
 provider:
   name: aws
-  runtime: nodejs20.x # Recomiendo 20.x por estabilidad en Labs
+  runtime: nodejs20.x
   region: us-east-1
   timeout: 29
   memorySize: 1024
   
-  # --- CLAVE PARA ESTUDIANTES ---
-  # Esto fuerza a TODAS las lambdas a usar el rol pre-creado.
-  # No se crearán nuevos roles ni políticas.
+  # --- CRÍTICO PARA AWS ACADEMY ---
+  # Esto fuerza a usar el rol existente y evita que Serverless intente crear roles nuevos.
   iam:
-    role: arn:aws:iam::131515946730:role/LabRole 
+    role: arn:aws:iam::131515946730:role/LabRole
 
   environment:
+    # Tablas
     USER_TABLE: UserTable-${sls:stage}
     ORDERS_TABLE: OrdersTable-${sls:stage}
-    ORDERS_BUCKET: restaurant-orders-dashboard-${sls:stage}
     MENU_TABLE: MenuTable-${sls:stage}
-    MENU_BUCKET: menu-bucket-${sls:stage}
     KITCHEN_TABLE: KitchenTable-${sls:stage}
-    JWT_SECRET: 1234
+    WEBSOCKET_TABLE: WebSocketConnections-${sls:stage}
+    
+    # Buckets
+    ORDERS_BUCKET: restaurant-orders-dashboard-${sls:stage}
+    MENU_BUCKET: menu-bucket-${sls:stage}
+    
+    # Configuración General
+    JWT_SECRET: 1234 # Cambiar por env var real en producción
     ALLOWED_ORIGINS: ${env:ALLOWED_ORIGINS, '*'}
+    CORS_ALLOW_CREDENTIALS: ${env:CORS_ALLOW_CREDENTIALS, 'false'}
     WS_STAGE: ${sls:stage}
     
-    # --- NUEVAS VARIABLES DE ENTORNO ---
+    # --- VARIABLES EVENT-DRIVEN ---
+    # Usamos el bus 'default' porque Labs no deja crear buses custom
     EVENT_BUS_NAME: default
     WAITING_QUEUE_URL: { Ref: WaitingOrdersQueue }
-    WEBSOCKET_TABLE: WebSocketConnections-${sls:stage}
-    # Construcción manual del endpoint WS para evitar referencias circulares
+    
+    # Construcción dinámica del endpoint WebSocket para el Broadcaster
     WEBSOCKET_API_ENDPOINT: 
       Fn::Join:
         - ""
@@ -45,13 +52,18 @@ provider:
 package:
   include:
     - scripts/**
+    - utils/**
+    - kitchen/**
+    - websocket/**
   exclude:
     - openapi.json
 
 custom: {}
 
 functions:
-  # --- TUS FUNCIONES EXISTENTES (Sin cambios mayores) ---
+  # ====================================================
+  # AUTHENTICATION
+  # ====================================================
   register:
     handler: auth/register.handler
     events:
@@ -62,10 +74,20 @@ functions:
     events:
       - http: { path: auth/login, method: post, cors: true }
 
+  # ====================================================
+  # AUTHORIZER (Tu código robusto)
+  # ====================================================
   authorizer:
     handler: authorizer.handler
+    # ¡IMPORTANTE! Pasamos explícitamente el secreto para evitar error 500
+    environment:
+      JWT_SECRET: ${self:provider.environment.JWT_SECRET}
 
-  # --- CREATE ORDER MODIFICADO (Ahora es asíncrono) ---
+  # ====================================================
+  # ORDERS (Core + Eventos)
+  # ====================================================
+  
+  # Crea el pedido y dispara evento 'OrderCreated' a EventBridge
   ordersCreate:
     handler: orders/index.create
     events:
@@ -73,86 +95,90 @@ functions:
           path: orders
           method: post
           cors: true
-          authorizer:
-              name: authorizer
-              type: request
-              identitySource: method.request.header.Authorization
+          authorizer: &authConfig # Usamos ancla YAML para no repetir configuración
+            name: authorizer
+            type: request # Envía headers completos (necesario para tu código)
+            identitySource: method.request.header.Authorization
+            resultTtl: 0 # Sin caché para evitar errores durante desarrollo
 
-  # --- EL RESTO DE TUS ENDPOINTS DE LECTURA/ADMIN ---
   ordersList:
     handler: orders/index.list
     events:
-      - http: { path: orders, method: get, cors: true, authorizer: { name: authorizer, type: request, identitySource: method.request.header.Authorization } }
+      - http: { path: orders, method: get, cors: true, authorizer: *authConfig }
 
   ordersGet:
     handler: orders/index.get
     events:
-      - http: { path: orders/{id}, method: get, cors: true, authorizer: { name: authorizer, type: request, identitySource: method.request.header.Authorization } }
-  
-  # UPDATE STATUS (Dispara eventos al cambiar estado)
+      - http: { path: orders/{id}, method: get, cors: true, authorizer: *authConfig }
+
+  # Actualiza estado y dispara 'KitchenSpaceAvailable' si se libera cocina
   ordersUpdateStatus:
     handler: orders/index.updateStatus
     events:
-      - http: { path: orders/{id}/status, method: patch, cors: true, authorizer: { name: authorizer, type: request, identitySource: method.request.header.Authorization } }
+      - http: { path: orders/{id}/status, method: patch, cors: true, authorizer: *authConfig }
 
+  # ====================================================
+  # ADMIN & KITCHEN MANAGEMENT
+  # ====================================================
   createKitchen:
     handler: kitchen/createKitchen.handler
     events:
-      - http: { path: kitchens, method: post, cors: true, authorizer: { name: authorizer, type: request, identitySource: method.request.header.Authorization } }
+      - http: { path: kitchens, method: post, cors: true, authorizer: *authConfig }
 
   listKitchens:
     handler: kitchen/listKitchens.handler
     events:
-      - http: { path: kitchens, method: get, cors: true }
+      - http: { path: kitchens, method: get, cors: true } # Público para el dashboard
 
   getMenu:
     handler: kitchen/getMenu.handler
     events:
-      - http: { path: menu, method: get, cors: true }
+      - http: { path: menu, method: get, cors: true } # Público
 
   adminCreateWorker:
     handler: admin/createWorker.handler
     events:
-      - http: { path: admin/workers, method: post, cors: true, authorizer: { name: authorizer, type: request, identitySource: method.request.header.Authorization } }
+      - http: { path: admin/workers, method: post, cors: true, authorizer: *authConfig }
 
   adminCreateMenu:
     handler: admin/createMenu.handler
     events:
-      - http: { path: admin/menu, method: post, cors: true, authorizer: { name: authorizer, type: request, identitySource: method.request.header.Authorization } }
-  
+      - http: { path: admin/menu, method: post, cors: true, authorizer: *authConfig }
+
   adminUpdateMenu:
     handler: admin/updateMenu.handler
     events:
-      - http: { path: admin/menu, method: patch, cors: true, authorizer: { name: authorizer, type: request, identitySource: method.request.header.Authorization } }
+      - http: { path: admin/menu, method: patch, cors: true, authorizer: *authConfig }
 
-
-  # --- NUEVAS FUNCIONES EVENT-DRIVEN (Backend Reactivo) ---
-
-  # 1. Allocation Manager: Recibe OrderCreated -> Decide (Cocina o SQS)
+  # ====================================================
+  # EVENT DRIVEN BACKEND (Procesamiento Asíncrono)
+  # ====================================================
+  
+  # 1. Router: Recibe 'OrderCreated' -> Decide si va a Cocina o SQS
   allocationManager:
     handler: kitchen/capacity.check
     events:
       - eventBridge:
           eventBus: default
           pattern:
-            source:
-              - bemmbos.orders
-            detail-type:
-              - OrderCreated
+            source: [ "bemmbos.orders" ]
+            detail-type: [ "OrderCreated" ]
 
-  # 2. Queue Worker: Recibe KitchenSpaceAvailable -> Procesa cola SQS
+  # 2. Worker: Recibe 'KitchenSpaceAvailable' -> Saca de SQS -> Asigna
   queueWorker:
     handler: kitchen/capacity.processQueue
     events:
       - eventBridge:
           eventBus: default
           pattern:
-            source:
-              - bemmbos.kitchen
-            detail-type:
-              - KitchenSpaceAvailable
+            source: [ "bemmbos.kitchen" ]
+            detail-type: [ "KitchenSpaceAvailable" ]
 
-  # 3. WebSockets (Conexión)
+  # ====================================================
+  # WEBSOCKETS (Real-time Dashboard)
+  # ====================================================
+  
+  # Maneja conexión ($connect)
   wsConnect:
     handler: websocket/handler.connect
     events:
@@ -161,20 +187,20 @@ functions:
       - websocket:
           route: $disconnect
 
-  # 4. Broadcaster (Escucha eventos y notifica al frontend)
+  # Notifica al frontend cuando ocurren eventos
   broadcaster:
     handler: websocket/handler.broadcast
     events:
       - eventBridge:
           eventBus: default
           pattern:
-            source:
-              - bemmbos.orders
-              - bemmbos.kitchen
+            source: [ "bemmbos.orders", "bemmbos.kitchen" ]
 
 resources:
   Resources:
-    # --- TUS RECURSOS EXISTENTES ---
+    # --------------------------------------------------
+    # DynamoDB Tables
+    # --------------------------------------------------
     UserTable:
       Type: AWS::DynamoDB::Table
       Properties:
@@ -218,11 +244,6 @@ resources:
           - { AttributeName: PK, KeyType: HASH }
           - { AttributeName: SK, KeyType: RANGE }
 
-    OrdersBucket:
-      Type: AWS::S3::Bucket
-      Properties:
-        BucketName: ${self:provider.environment.ORDERS_BUCKET}
-
     MenuTable:
       Type: AWS::DynamoDB::Table
       Properties:
@@ -235,12 +256,6 @@ resources:
           - { AttributeName: tenantId, KeyType: HASH }
           - { AttributeName: dishId, KeyType: RANGE }
 
-    MenuBucket:
-      Type: AWS::S3::Bucket
-      Properties:
-        BucketName: ${self:provider.environment.MENU_BUCKET}
-
-    # Nota: Agregué la KitchenTable aquí explícitamente para asegurar que se crea
     KitchenTable:
       Type: AWS::DynamoDB::Table
       Properties:
@@ -253,27 +268,35 @@ resources:
           - { AttributeName: tenantId, KeyType: HASH }
           - { AttributeName: kitchenId, KeyType: RANGE }
 
-    # --- NUEVOS RECURSOS ---
-    
-    # Cola SQS para pedidos en espera
-    WaitingOrdersQueue:
-      Type: AWS::SQS::Queue
-      Properties:
-        QueueName: waiting-orders-queue-${sls:stage}
-
-    # Tabla para conexiones WebSocket
     WebSocketConnectionsTable:
       Type: AWS::DynamoDB::Table
       Properties:
         TableName: ${self:provider.environment.WEBSOCKET_TABLE}
         BillingMode: PAY_PER_REQUEST
         AttributeDefinitions:
-          - AttributeName: tenantId
-            AttributeType: S
-          - AttributeName: connectionId
-            AttributeType: S
+          - { AttributeName: tenantId, AttributeType: S }
+          - { AttributeName: connectionId, AttributeType: S }
         KeySchema:
-          - AttributeName: tenantId
-            KeyType: HASH
-          - AttributeName: connectionId
-            KeyType: RANGE
+          - { AttributeName: tenantId, KeyType: HASH }
+          - { AttributeName: connectionId, KeyType: RANGE }
+
+    # --------------------------------------------------
+    # S3 Buckets
+    # --------------------------------------------------
+    OrdersBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:provider.environment.ORDERS_BUCKET}
+
+    MenuBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:provider.environment.MENU_BUCKET}
+
+    # --------------------------------------------------
+    # SQS Queue
+    # --------------------------------------------------
+    WaitingOrdersQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: waiting-orders-queue-${sls:stage}
