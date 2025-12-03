@@ -9,7 +9,8 @@
   },
   "devDependencies": {
     "serverless": "^3.40.0",
-    "serverless-plugin-scripts": "^1.0.2"
+    "serverless-plugin-scripts": "^1.0.2",
+    "serverless-step-functions": "^3.23.3"
   },
   "overrides": {
     "serverless-dotenv-plugin": {

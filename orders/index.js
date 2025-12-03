@@ -6,6 +6,7 @@ const { getUserFromEvent, response } = require('./utils');
 
 // Export individual handlers for Serverless functions
 async function create(event) {
+  const { getUserFromEvent } = require('./utils');
   const user = getUserFromEvent(event);
   return handleCreate(event, user);
 }

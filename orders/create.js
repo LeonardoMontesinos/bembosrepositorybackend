@@ -1,183 +1,98 @@
 const { PutItemCommand } = require("@aws-sdk/client-dynamodb");
-const { PutObjectCommand } = require("@aws-sdk/client-s3");
-const { dynamo, s3, TABLE_NAME, BUCKET_NAME } = require("./db");
-const { parseBody, generateOrderId, response, logOrderEvent } = require("./utils");
+const { PutObjectCommand } = require('@aws-sdk/client-s3');
+const { EventBridgeClient, PutEventsCommand } = require("@aws-sdk/client-eventbridge");
+const { dynamo, s3, TABLE_NAME, BUCKET_NAME } = require("./db"); // Asumo que estos exports existen en db.js
+const { response, generateOrderId, logOrderEvent, getUserFromEvent } = require("./utils");
 
-async function handleCreate(event, user) {
+const eventBridge = new EventBridgeClient({});
+
+exports.handler = async (event) => {
   try {
-    const data = parseBody(event);
+    const user = getUserFromEvent(event);
+    const body = JSON.parse(event.body || "{}");
+    const { items, type, total, kitchenId } = body; 
 
-    const tenantId = user.tenantId || "DEFAULT";
+    // Validaciones básicas
+    if (!items || !items.length) {
+      return response(400, { message: "No items provided" });
+    }
+
+    const tenantId = user.tenantId || 'DEFAULT';
+    const createdBy = user.userId || user.sub || 'anonymous';
     const orderId = generateOrderId();
     const now = new Date().toISOString();
-    const createdBy = user.userId || "anonymous";
+    const assignedKitchenId = kitchenId || "kitchen_1"; 
+    const orderType = type || "STORE";
 
-    // -------------------------------
-    // 1. Validar tipo de pedido
-    // -------------------------------
-
-    const orderType = (data.type || "").toUpperCase();
-    if (!["DELIVERY", "EN_TIENDA"].includes(orderType)) {
-      return response(400, {
-        message: "Invalid order type. Must be DELIVERY or EN_TIENDA",
-      });
-    }
-
-    // -------------------------------
-    // 2. Obtener y validar items
-    // -------------------------------
-
-    const items = Array.isArray(data.items) ? data.items : [];
-
-    if (items.length === 0) {
-      return response(400, { message: "items is required and must be non-empty" });
-    }
-
-    for (const it of items) {
-      if (!it.productId) {
-        return response(400, {
-          message: "Each item must include productId",
-        });
-      }
-    }
-    
-    for (const it of items) {
-      if (typeof it.qty !== "number" || typeof it.price !== "number") {
-        return response(400, {
-          message: "Each item must include numeric qty and price",
-        });
-      }
-    }
-
-    // -------------------------------
-    // 3. Calcular total automáticamente
-    // -------------------------------
-
-    const total = items.reduce(
-      (sum, item) => sum + Number(item.qty) * Number(item.price),
-      0
-    );
-
-    // -------------------------------
-    // 4. Validar detalles adicionales
-    // -------------------------------
-
-    const deliveryDetails = data.deliveryDetails || {};
-
-    // Datos comunes
-    const commonDetails = {
-      phone: deliveryDetails.phone || null,
-      dni: deliveryDetails.dni || null,
-      paymentMethod: deliveryDetails.paymentMethod || null,
-      notes: deliveryDetails.notes || null,
-    };
-
-    // Validación para DELIVERY
-    if (orderType === "DELIVERY") {
-      if (!deliveryDetails.address) {
-        return response(400, {
-          message: "address is required when type is DELIVERY",
-        });
-      }
-    }
-
-    const fullDeliveryDetails = {
-      ...commonDetails,
-      address: orderType === "DELIVERY" ? deliveryDetails.address : null,
-    };
-
-    // -------------------------------
-    // 5. Construir item DynamoDB
-    // -------------------------------
-
+    // 1. Guardar en DynamoDB
     const item = {
       PK: { S: `TENANT#${tenantId}` },
       SK: { S: `ORDER#${orderId}` },
-      createdAt: { S: now },
-      updatedAt: { S: now },
-      createdBy: { S: createdBy },
+      tenantId: { S: tenantId },
+      orderId: { S: orderId },
       status: { S: "CREATED" },
       type: { S: orderType },
       items: { S: JSON.stringify(items) },
-      total: { N: total.toString() },
-      deliveryDetails: { S: JSON.stringify(fullDeliveryDetails) },
+      total: { N: total ? String(total) : "0" },
+      kitchenId: { S: assignedKitchenId },
+      createdBy: { S: createdBy },
+      createdAt: { S: now },
+      updatedAt: { S: now }
     };
 
-    // -------------------------------
-    // 6. Insertar en DynamoDB
-    // -------------------------------
+    await dynamo.send(new PutItemCommand({
+      TableName: TABLE_NAME,
+      Item: item
+    }));
 
-    await dynamo.send(
-      new PutItemCommand({
-        TableName: TABLE_NAME,
-        Item: item,
-      })
-    );
-
-    // -------------------------------
-    // 7. Copia opcional en S3
-    // -------------------------------
-
+    // 2. Copia opcional en S3 (Tu lógica original)
     const s3Body = JSON.stringify({
-      orderId,
-      tenantId,
-      createdAt: now,
-      createdBy,
-      status: "CREATED",
-      type: orderType,
-      total,
-      deliveryDetails: fullDeliveryDetails,
+      orderId, tenantId, createdAt: now, createdBy, status: "CREATED", type: orderType, total
     });
+    
+    // Envolvemos S3 en try-catch no bloqueante por si falla
+    try {
+        await s3.send(new PutObjectCommand({
+            Bucket: BUCKET_NAME,
+            Key: `${orderId}.json`,
+            Body: s3Body,
+            ContentType: "application/json",
+        }));
+    } catch (e) { console.warn("S3 Backup failed", e); }
 
-    await s3.send(
-      new PutObjectCommand({
-        Bucket: BUCKET_NAME,
-        Key: `${orderId}.json`,
-        Body: s3Body,
-        ContentType: "application/json",
-      })
-    );
-
-    // -------------------------------
-    // 8. Log de auditoría
-    // -------------------------------
-
+    // 3. Log de auditoría
     await logOrderEvent({
-      orderId,
-      tenantId,
-      userId: createdBy,
-      eventType: "CREATE",
-      payload: {
-        status: "CREATED",
-        type: orderType,
-        total,
-      },
+      orderId, tenantId, userId: createdBy, eventType: "CREATE",
+      payload: { status: "CREATED", type: orderType, total }
     });
 
-    // -------------------------------
-    // 9. Respuesta final
-    // -------------------------------
+    // ---------------------------------------------------------
+    // 4. NUEVO: Emitir evento a IngestionBus (EventBridge)
+    // ---------------------------------------------------------
+    await eventBridge.send(new PutEventsCommand({
+      Entries: [{
+        Source: "bembos.orders",
+        DetailType: "OrderCreated",
+        Detail: JSON.stringify({
+           orderId, 
+           tenantId, 
+           kitchenId: assignedKitchenId, 
+           type: orderType, 
+           items,
+           customerEmail: user.email
+        }),
+        EventBusName: process.env.INGESTION_BUS
+      }]
+    }));
 
     return response(201, {
-      message: "Order created successfully",
-      order: {
-        orderId,
-        tenantId,
-        status: "CREATED",
-        type: orderType,
-        items,
-        total,
-        createdAt: now,
-        updatedAt: now,
-        createdBy,
-        deliveryDetails: fullDeliveryDetails,
-      },
+      message: "Order created and sent to kitchen workflow",
+      orderId,
+      status: "CREATED"
     });
-  } catch (err) {
-    console.error("Error creating order", err);
-    return response(500, { message: "Internal server error" });
+
+  } catch (error) {
+    console.error("CREATE ORDER ERROR:", error);
+    return response(500, { message: "Internal Server Error", error: error.message });
   }
-}
-
-module.exports = { handleCreate };
-
+};
