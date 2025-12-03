@@ -9,38 +9,40 @@ provider:
   name: aws
   runtime: nodejs20.x
   region: us-east-1
-  timeout: 30
-  memorySize: 2048
-  # Uso de AccountID dinámico para evitar errores en laboratorios
+  timeout: 29
+  memorySize: 1024
+  # Uso de AccountID dinámico para portabilidad en laboratorios
   iam:
     role: arn:aws:iam::${aws:accountId}:role/LabRole
 
   environment:
-    # --- Tablas ---
+    # --- TABLAS DYNAMODB ---
     USER_TABLE: UserTable-${sls:stage}
     ORDERS_TABLE: OrdersTable-${sls:stage}
     MENU_TABLE: MenuTable-${sls:stage}
     KITCHEN_TABLE: KitchenTable-${sls:stage}
     KITCHEN_STATE_TABLE: KitchenStateTable-${sls:stage}
+    AUDIT_TABLE: AuditTable-${sls:stage}
+    CONNECTIONS_TABLE: ConnectionsTable-${sls:stage}
     
-    # --- Buckets ---
+    # --- BUCKETS S3 ---
     ORDERS_BUCKET: restaurant-orders-dashboard-${sls:stage}-${aws:accountId}
     MENU_BUCKET: menu-bucket-${sls:stage}-${aws:accountId}
     
-    # --- Config General ---
+    # --- CONFIGURACIÓN ---
     JWT_SECRET: ${env:JWT_SECRET, '1234'}
     ALLOWED_ORIGINS: ${env:ALLOWED_ORIGINS, '*'}
     CORS_ALLOW_CREDENTIALS: ${env:CORS_ALLOW_CREDENTIALS, 'false'}
     SLS_STAGE: ${sls:stage}
     
-    # --- Eventos e Infraestructura ---
+    # --- INFRAESTRUCTURA DE EVENTOS ---
     INGESTION_BUS: IngestionBus-${sls:stage}
     NOTIFICATION_BUS: NotificationBus-${sls:stage}
     WAITING_QUEUE_URL: { Ref: WaitingOrdersQueue }
     OPERATIONS_TOPIC_ARN: { Ref: OperationsAlertTopic }
     CUSTOMER_TOPIC_ARN: { Ref: CustomerNotificationTopic }
     
-    # --- ARN de Step Function (Construido manualmente para evitar dependencia circular) ---
+    # --- ARN STEP FUNCTION (Manual para evitar dep. circular) ---
     STATE_MACHINE_ARN: 
       Fn::Join:
         - ":"
@@ -52,13 +54,13 @@ provider:
 
 package:
   patterns:
-    - '!node_modules/aws-sdk/**'
+    - '!node_modules/aws-sdk/**' # Excluir SDK si usas runtime node18/20
     - '!tests/**'
     - '!docs/**'
 
 functions:
   # ===================================================
-  # 1. AUTENTICACIÓN
+  # 1. AUTH
   # ===================================================
   register:
     handler: auth/register.handler
@@ -76,7 +78,7 @@ functions:
     handler: authorizer.handler
 
   # ===================================================
-  # 2. ADMINISTRACIÓN
+  # 2. ADMIN & KITCHEN CRUD
   # ===================================================
   adminCreateWorker:
     handler: admin/createWorker.handler
@@ -93,9 +95,6 @@ functions:
     events:
       - http: { path: admin/menu, method: patch, cors: true, authorizer: { name: authorizer, type: request, identitySource: method.request.header.Authorization } }
 
-  # ===================================================
-  # 3. GESTIÓN DE COCINAS (CRUD)
-  # ===================================================
   createKitchen:
     handler: kitchen/createKitchen.handler
     events:
@@ -112,14 +111,14 @@ functions:
       - http: { path: menu, method: get, cors: true }
 
   # ===================================================
-  # 4. PEDIDOS (API)
+  # 3. ORDERS API
   # ===================================================
   ordersCreate:
     handler: orders/create.handler
     events:
       - http: { path: orders, method: post, cors: true, authorizer: { name: authorizer, type: request, identitySource: method.request.header.Authorization } }
   
-  # LISTA INTELIGENTE (Admin ve todo / User ve suyos)
+  # LISTA INTELIGENTE (Detecta rol Admin vs User)
   ordersList:
     handler: orders/list.handler 
     events:
@@ -135,11 +134,66 @@ functions:
     events:
       - http: { path: orders/{id}/status, method: patch, cors: true, authorizer: { name: authorizer, type: request, identitySource: method.request.header.Authorization } }
 
+  # HISTORIAL DE AUDITORÍA (GET)
+  getOrderHistory:
+    handler: orders/history.handler
+    events:
+      - http: { path: orders/{id}/history, method: get, cors: true, authorizer: { name: authorizer, type: request, identitySource: method.request.header.Authorization } }
+
   # ===================================================
-  # 5. ARQUITECTURA DE EVENTOS (Capacity & Flow)
+  # 4. WEBSOCKETS (REAL-TIME)
   # ===================================================
   
-  # A. Checker: Revisa capacidad al crear orden
+  # Conexión ($connect / $disconnect)
+  wsConnectionHandler:
+    handler: websocket/connectionManager.handler
+    events:
+      - websocket:
+          route: $connect
+          authorizer:
+            name: authorizer
+            # Le decimos a AWS que busque el token en la query string
+            identitySource:
+              - 'route.request.querystring.token'
+      - websocket:
+          route: $disconnect
+
+  # Broadcaster: Lee Stream y notifica al socket
+  wsBroadcaster:
+    handler: websocket/broadcaster.handler
+    environment:
+      # Construcción dinámica del endpoint de callback para WS
+      WEBSOCKET_API_ENDPOINT:
+        Fn::Join:
+          - ""
+          - - "https://"
+            - Ref: WebsocketsApi
+            - ".execute-api."
+            - Ref: AWS::Region
+            - ".amazonaws.com/${sls:stage}"
+    events:
+      - stream:
+          type: dynamodb
+          arn:
+            Fn::GetAtt: [OrdersTable, StreamArn]
+          batchSize: 1
+
+  # ===================================================
+  # 5. BACKEND PROCESSES & WORKFLOW
+  # ===================================================
+  
+  # Auditoría: Guarda logs en AuditTable (Stream)
+  auditLogger:
+    handler: audit/logger.handler
+    events:
+      - stream:
+          type: dynamodb
+          arn:
+            Fn::GetAtt: [OrdersTable, StreamArn]
+          batchSize: 1
+          startingPosition: LATEST
+
+  # Capacity Checker (EventBridge Entry)
   capacityChecker:
     handler: capacity/checker.handler
     events:
@@ -149,29 +203,26 @@ functions:
             source: ['bembos.orders']
             detail-type: ['OrderCreated']
 
-  # B. Manager & Dequeue: Liberan espacio al terminar
   kitchenSpaceManager:
     handler: capacity/manager.handler
 
   dequeueOrder:
     handler: capacity/dequeue.handler
 
-  # C. Workflow Tasks (Conectadas a BD)
+  # Workflow Tasks (Conexión Real a BD)
   sfPrepare:
     handler: workflow/prepare.handler
-    environment:
-      ORDERS_TABLE: { Ref: OrdersTable }
+    environment: { ORDERS_TABLE: { Ref: OrdersTable } }
 
   sfAssignCook:
     handler: workflow/assignCook.handler
-    environment:
-      ORDERS_TABLE: { Ref: OrdersTable }
+    environment: 
+      ORDERS_TABLE: { Ref: OrdersTable } 
       USER_TABLE: { Ref: UserTable }
 
   sfCookProcess:
     handler: workflow/cook.handler
-    environment:
-      ORDERS_TABLE: { Ref: OrdersTable }
+    environment: { ORDERS_TABLE: { Ref: OrdersTable } }
 
   sfDispatch:
     handler: workflow/dispatch.handler
@@ -179,7 +230,6 @@ functions:
       ORDERS_TABLE: { Ref: OrdersTable }
       NOTIFICATION_BUS: { Ref: NotificationBus }
 
-  # D. Notificaciones
   notifyCustomer:
     handler: notifications/emailCustomer.handler
     events:
@@ -190,7 +240,7 @@ functions:
             detail-type: ['OrderReady']
 
 # ===================================================
-# STEP FUNCTION DEFINITION
+# DEFINICIÓN DE STEP FUNCTION
 # ===================================================
 stepFunctions:
   stateMachines:
@@ -198,42 +248,32 @@ stepFunctions:
       name: KitchenWorkflow-${sls:stage}
       role: arn:aws:iam::${aws:accountId}:role/LabRole
       definition:
-        Comment: "Flujo Inteligente de Cocina Bembos"
+        Comment: "Flujo Inteligente de Cocina"
         StartAt: PrepareData
         States:
-          # FASE 1: Preparación
           PrepareData:
             Type: Task
             Resource: !GetAtt sfPrepare.Arn
             Next: AssignCook
-          
           AssignCook:
             Type: Task
             Resource: !GetAtt sfAssignCook.Arn
             Next: CookingPhase
-          
-          # FASE 2: Cocción
           CookingPhase:
             Type: Task
             Resource: !GetAtt sfCookProcess.Arn
             Next: CookingWait
-          
-          # FASE 3: Espera Real (1 minuto)
           CookingWait:
             Type: Wait
-            Seconds: 60 
+            Seconds: 60 # Espera simulada de cocción
             Next: CheckOrderType
-
-          # FASE 4: Decisión
           CheckOrderType:
             Type: Choice
             Choices:
               - Variable: "$.type"
                 StringEquals: "DELIVERY"
                 Next: ProcessDelivery
-            Default: ProcessPickup # "STORE" va aquí
-
-          # Rama Delivery
+            Default: ProcessPickup
           ProcessDelivery:
             Type: Pass
             Parameters:
@@ -241,8 +281,6 @@ stepFunctions:
               msg: "Tu repartidor va en camino 🛵"
             ResultPath: "$.dispatchInfo"
             Next: FinalizeOrder
-
-          # Rama Tienda
           ProcessPickup:
             Type: Pass
             Parameters:
@@ -250,21 +288,21 @@ stepFunctions:
               msg: "Listo para recoger en mostrador 🍔"
             ResultPath: "$.dispatchInfo"
             Next: FinalizeOrder
-
-          # FASE 5: Finalización y Liberación
           FinalizeOrder:
             Type: Task
             Resource: !GetAtt sfDispatch.Arn
             Next: ReleaseCapacity
-
           ReleaseCapacity:
             Type: Task
             Resource: !GetAtt kitchenSpaceManager.Arn
             End: true
 
+# ===================================================
+# RECURSOS (CloudFormation)
+# ===================================================
 resources:
   Resources:
-    # --- DYNAMODB ---
+    # --- DYNAMODB TABLES ---
     UserTable:
       Type: AWS::DynamoDB::Table
       Properties:
@@ -295,12 +333,42 @@ resources:
       Properties:
         TableName: ${self:provider.environment.ORDERS_TABLE}
         BillingMode: PAY_PER_REQUEST
+        # Habilitar STREAMS para Auditoría y WebSockets
+        StreamSpecification:
+          StreamViewType: NEW_AND_OLD_IMAGES
         AttributeDefinitions:
           - { AttributeName: PK, AttributeType: S }
           - { AttributeName: SK, AttributeType: S }
         KeySchema:
           - { AttributeName: PK, KeyType: HASH }
           - { AttributeName: SK, KeyType: RANGE }
+
+    AuditTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:provider.environment.AUDIT_TABLE}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - { AttributeName: PK, AttributeType: S }
+          - { AttributeName: SK, AttributeType: S }
+        KeySchema:
+          - { AttributeName: PK, KeyType: HASH }
+          - { AttributeName: SK, KeyType: RANGE }
+
+    ConnectionsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${self:provider.environment.CONNECTIONS_TABLE}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - { AttributeName: connectionId, AttributeType: S }
+          - { AttributeName: userId, AttributeType: S }
+        KeySchema:
+          - { AttributeName: connectionId, KeyType: HASH }
+        GlobalSecondaryIndexes:
+          - IndexName: UserIndex
+            KeySchema: [{ AttributeName: userId, KeyType: HASH }]
+            Projection: { ProjectionType: ALL }
 
     MenuTable:
       Type: AWS::DynamoDB::Table
@@ -346,7 +414,7 @@ resources:
       Type: AWS::S3::Bucket
       Properties:
         BucketName: ${self:provider.environment.MENU_BUCKET}
-        # IMPORTANTE: Permitir ACL pública para imágenes
+        # Configuración para permitir imágenes públicas
         PublicAccessBlockConfiguration:
           BlockPublicAcls: false
           IgnorePublicAcls: false
@@ -356,7 +424,7 @@ resources:
           Rules:
             - ObjectOwnership: BucketOwnerPreferred
 
-    # --- EVENT BUSES ---
+    # --- EVENT BUSES & MESSAGING ---
     IngestionBus:
       Type: AWS::Events::EventBus
       Properties:
@@ -367,14 +435,12 @@ resources:
       Properties:
         Name: ${self:provider.environment.NOTIFICATION_BUS}
 
-    # --- QUEUE ---
     WaitingOrdersQueue:
       Type: AWS::SQS::Queue
       Properties:
         QueueName: WaitingOrdersQueue-${sls:stage}
         MessageRetentionPeriod: 86400
 
-    # --- SNS TOPICS ---
     OperationsAlertTopic:
       Type: AWS::SNS::Topic
       Properties:
