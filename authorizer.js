@@ -10,148 +10,48 @@ function fromBase64url(str) {
 
 exports.handler = async (event) => {
   try {
-    // Debug: registrar forma general del evento (sin incluir tokens)
-    try {
-      const debugEvent = {
-        hasHeaders: !!(event && event.headers),
-        methodArn: event && event.methodArn,
-        routeArn: event && event.routeArn,
-        requestContext: event && event.requestContext && {
-          apiId: event.requestContext.apiId,
-          accountId: event.requestContext.accountId,
-          region: event.requestContext.region,
-        },
-      };
-      console.debug("AUTHORIZER EVENT SUMMARY:", JSON.stringify(debugEvent));
-    } catch (e) {
-      console.debug("AUTHORIZER EVENT: (failed to stringify)");
-    }
-    // Soportar REQUEST authorizer (event.headers) y TOKEN authorizer (event.authorizationToken)
+    // 1. OBTENCIÓN DEL TOKEN (Soporte Híbrido: HTTP y WebSockets)
     let token = null;
 
-    if (event && event.headers) {
-      // Leer cabecera Authorization (case-insensitive)
+    // A. Intentar Header (API Gateway REST / HTTP)
+    if (event.headers) {
       token = event.headers.Authorization || event.headers.authorization;
     }
 
-    // Fallback al campo clásico de TOKEN authorizer
-    if (!token && event && event.authorizationToken) {
+    // B. Intentar Query String (WebSockets: wss://...?token=XYZ)
+    if (!token && event.queryStringParameters && event.queryStringParameters.token) {
+      token = event.queryStringParameters.token;
+    }
+
+    // C. Intentar Payload clásico (Token Authorizers antiguos)
+    if (!token && event.authorizationToken) {
       token = event.authorizationToken;
     }
 
-    // Validar que el token existe
+    // 2. VALIDACIONES BÁSICAS
     if (!token) {
-      console.error("AUTHORIZER ERROR: No token provided");
-      return {
-        principalId: "anonymous",
-        policyDocument: {
-          Version: "2012-10-17",
-          Statement: [
-            {
-              Action: "execute-api:Invoke",
-              Effect: "Deny",
-              Resource: event.methodArn || '*',
-            },
-          ],
-        },
-        context: {
-          error: "No token provided"
-        }
-      };
+      console.error("AUTHORIZER: No token found");
+      throw new Error("Unauthorized");
     }
 
-    // Verificar que JWT_SECRET está configurado
     if (!process.env.JWT_SECRET) {
-      console.error("AUTHORIZER ERROR: JWT_SECRET not configured");
-      return {
-        principalId: "anonymous",
-        policyDocument: {
-          Version: "2012-10-17",
-          Statement: [
-            {
-              Action: "execute-api:Invoke",
-              Effect: "Deny",
-              Resource: event.methodArn || '*',
-            },
-          ],
-        },
-        context: {
-          error: "JWT_SECRET not configured"
-        }
-      };
+      console.error("AUTHORIZER: JWT_SECRET missing");
+      throw new Error("Server Error");
     }
 
-    // Extraer el token (remover "Bearer " si existe)
+    // Limpiar prefijo Bearer si existe
     const raw = token.replace(/^Bearer\s+/i, "").trim();
-
-    if (!raw || raw.length === 0) {
-      console.error("AUTHORIZER ERROR: Empty token after processing");
-      return {
-        principalId: "anonymous",
-        policyDocument: {
-          Version: "2012-10-17",
-          Statement: [
-            {
-              Action: "execute-api:Invoke",
-              Effect: "Deny",
-              Resource: event.methodArn || '*',
-            },
-          ],
-        },
-        context: {
-          error: "Empty token after processing"
-        }
-      };
-    }
-
-    // Validar formato del token (debe tener 3 partes separadas por puntos)
     const parts = raw.split(".");
+
     if (parts.length !== 3) {
-      console.error("AUTHORIZER ERROR: Invalid token format");
-      return {
-        principalId: "anonymous",
-        policyDocument: {
-          Version: "2012-10-17",
-          Statement: [
-            {
-              Action: "execute-api:Invoke",
-              Effect: "Deny",
-              Resource: event.methodArn || '*',
-            },
-          ],
-        },
-        context: {
-          error: "Invalid token format"
-        }
-      };
+      console.error("AUTHORIZER: Invalid token structure");
+      throw new Error("Unauthorized");
     }
 
+    // 3. VERIFICACIÓN DE FIRMA (HMAC SHA256)
     const [headerEnc, payloadEnc, signature] = parts;
-
-    // Verificar que las partes no estén vacías
-    if (!headerEnc || !payloadEnc || !signature) {
-      console.error("AUTHORIZER ERROR: Token parts are empty");
-      return {
-        principalId: "anonymous",
-        policyDocument: {
-          Version: "2012-10-17",
-          Statement: [
-            {
-              Action: "execute-api:Invoke",
-              Effect: "Deny",
-              Resource: event.methodArn || '*',
-            },
-          ],
-        },
-        context: {
-          error: "Token parts are empty"
-        }
-      };
-    }
-
-    // Verificar firma del token usando el mismo algoritmo (HMAC SHA256) y JWT_SECRET
     const data = `${headerEnc}.${payloadEnc}`;
-
+    
     const expectedSig = createHmac("sha256", process.env.JWT_SECRET)
       .update(data)
       .digest("base64")
@@ -160,181 +60,50 @@ exports.handler = async (event) => {
       .replace(/\//g, "_");
 
     if (signature !== expectedSig) {
-      console.error("AUTHORIZER ERROR: Invalid signature");
-      return {
-        principalId: "anonymous",
-        policyDocument: {
-          Version: "2012-10-17",
-          Statement: [
-            {
-              Action: "execute-api:Invoke",
-              Effect: "Deny",
-              Resource: event.methodArn || '*',
-            },
-          ],
-        },
-        context: {
-          error: "Invalid signature"
-        }
-      };
+      console.error("AUTHORIZER: Signature mismatch");
+      throw new Error("Unauthorized");
     }
 
-    // Decodificar payload
-    let payload;
-    try {
-      payload = JSON.parse(fromBase64url(payloadEnc));
-    } catch (parseError) {
-      console.error("AUTHORIZER ERROR: Failed to parse payload", parseError);
-      return {
-        principalId: "anonymous",
-        policyDocument: {
-          Version: "2012-10-17",
-          Statement: [
-            {
-              Action: "execute-api:Invoke",
-              Effect: "Deny",
-              Resource: event.methodArn || '*',
-            },
-          ],
-        },
-        context: {
-          error: "Failed to parse payload"
-        }
-      };
-    }
-
-    // Validar campos requeridos en el payload
-    if (!payload.userId || !payload.role || !payload.email) {
-      console.error("AUTHORIZER ERROR: Missing required fields in payload");
-      return {
-        principalId: "anonymous",
-        policyDocument: {
-          Version: "2012-10-17",
-          Statement: [
-            {
-              Action: "execute-api:Invoke",
-              Effect: "Deny",
-              Resource: event.methodArn || '*',
-            },
-          ],
-        },
-        context: {
-          error: "Missing required fields in payload"
-        }
-      };
-    }
-
-    // Verificar expiración del token
+    // 4. DECODIFICAR PAYLOAD Y VALIDAR EXPIRACIÓN
+    const payload = JSON.parse(fromBase64url(payloadEnc));
     const now = Math.floor(Date.now() / 1000);
+
     if (payload.exp && payload.exp < now) {
-      console.error("AUTHORIZER ERROR: Token expired");
-      return {
-        principalId: "anonymous",
-        policyDocument: {
-          Version: "2012-10-17",
-          Statement: [
-            {
-              Action: "execute-api:Invoke",
-              Effect: "Deny",
-              Resource: event.methodArn || '*',
-            },
-          ],
-        },
-        context: {
-          error: "Token expired"
-        }
-      };
+      console.error("AUTHORIZER: Token expired");
+      throw new Error("Unauthorized");
     }
 
-    // Obtener methodArn del evento (puede estar en diferentes lugares según el tipo de authorizer)
-    let methodArn = event.methodArn;
-    
-    // Si no está disponible, intentar construir el ARN o usar wildcard
-    if (!methodArn) {
-      // Para authorizers de tipo REQUEST, construir ARN desde event.routeArn o usar wildcard
-      if (event.routeArn) {
-        methodArn = event.routeArn;
-      } else if (event.requestContext && event.requestContext.apiId) {
-        // Construir ARN básico con wildcard para permitir todas las rutas
-        const apiId = event.requestContext.apiId;
-        const region = event.requestContext.region || process.env.AWS_REGION || 'us-east-1';
-        const accountId = event.requestContext.accountId || '*';
-        methodArn = `arn:aws:execute-api:${region}:${accountId}:${apiId}/*/*`;
-      } else {
-        // Fallback: usar wildcard completo
-        methodArn = '*';
-      }
-    }
-    
-    // Si el methodArn termina con un método específico, crear wildcard para permitir todas las rutas
-    // Esto es necesario porque API Gateway puede pasar ARNs específicos que no coinciden
-    if (methodArn && !methodArn.endsWith('*/*')) {
-      // Extraer la parte base del ARN (hasta el stage)
-      const arnParts = methodArn.split('/');
-      if (arnParts.length >= 2) {
-        // Reemplazar método y path con wildcards
-        methodArn = `${arnParts.slice(0, -2).join('/')}/*/*`;
-      }
-    }
+    // 5. CONSTRUCCIÓN DE LA POLÍTICA IAM
+    // Determinar el Resource (ARN) al que se da acceso.
+    // Usamos wildcard para simplificar y evitar problemas de caché de políticas en WS.
+    const methodArn = event.methodArn || event.routeArn || '*';
 
-    // Preparar contexto seguro: API Gateway/Lambda authorizer solo acepta strings
-    // Además sanitizamos las claves para que solo contengan [A-Za-z0-9_]
-    const safeContext = {};
-    for (const rawKey of Object.keys(payload)) {
-      // Sanitize key name (replace invalid characters with underscore)
-      const key = String(rawKey).replace(/[^a-zA-Z0-9_]/g, "_");
-      // Convertir valor a string y truncar para evitar límites excesivos
-      let val = "";
-      try {
-        val = String(payload[rawKey]);
-      } catch (e) {
-        val = "" + payload[rawKey];
-      }
-      // Truncar a 1024 caracteres para seguridad
-      if (val.length > 1024) val = val.substring(0, 1024);
-      safeContext[key] = val;
-    }
-    //    if (process.env.DEBUG_AUTHORIZER === 'true') {
-    //   try {
-    //     console.debug('AUTHORIZER SAFE CONTEXT:', JSON.stringify(safeContext));
-    //   } catch (e) {
-    //     console.debug('AUTHORIZER SAFE CONTEXT (non-serializable)');
-    //   }
-    // }
-  
-    // Retornar política IAM con contexto (valores como strings)
+    // Contexto seguro (Solo strings permitidos en Lambda Authorizers)
+    const context = {
+      userId: String(payload.userId),
+      role: String(payload.role),
+      email: String(payload.email),
+      tenantId: String(payload.tenantId || "DEFAULT")
+    };
+
     return {
-      principalId: String(payload.userId),
+      principalId: payload.userId,
       policyDocument: {
         Version: "2012-10-17",
         Statement: [
           {
             Action: "execute-api:Invoke",
             Effect: "Allow",
-            Resource: methodArn,
+            Resource: "*", // Permitir invocar cualquier ruta de esta API
           },
         ],
       },
-      context: safeContext,
+      context: context,
     };
 
   } catch (err) {
-    console.error("AUTHORIZER ERROR:", err);
-    return {
-      principalId: "anonymous",
-      policyDocument: {
-        Version: "2012-10-17",
-        Statement: [
-          {
-            Action: "execute-api:Invoke",
-            Effect: "Deny",
-            Resource: (event && event.methodArn) || '*',
-          },
-        ],
-      },
-      context: {
-        error: err.message || "Unauthorized"
-      }
-    };
+    console.error("AUTHORIZER ERROR:", err.message);
+    // Para API Gateway, lanzar "Unauthorized" gatilla un 401.
+    throw new Error("Unauthorized");
   }
 };
