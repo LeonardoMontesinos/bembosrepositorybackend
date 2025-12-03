@@ -1,20 +1,24 @@
 const { DynamoDBClient, UpdateItemCommand } = require("@aws-sdk/client-dynamodb");
 const dynamo = new DynamoDBClient({});
+const TABLE_NAME = process.env.ORDERS_TABLE;
 
 exports.handler = async (event) => {
-    console.log(`[Step 3] Cooking order ${event.orderId}...`);
+    console.log(`[Step 3] Order ${event.orderId} starts cooking...`);
     
-    // Actualizar estado en DynamoDB a COOKING
     await dynamo.send(new UpdateItemCommand({
-        TableName: process.env.ORDERS_TABLE,
-        Key: { PK: { S: `TENANT#${event.tenantId}` }, SK: { S: `ORDER#${event.orderId}` } },
-        UpdateExpression: "SET #s = :s",
+        TableName: TABLE_NAME,
+        Key: { 
+            PK: { S: `TENANT#${event.tenantId}` }, 
+            SK: { S: `ORDER#${event.orderId}` } 
+        },
+        UpdateExpression: "SET #s = :s, updatedAt = :now",
         ExpressionAttributeNames: { "#s": "status" },
-        ExpressionAttributeValues: { ":s": { S: "COOKING" } }
+        ExpressionAttributeValues: { 
+            ":s": { S: "COOKING" },
+            ":now": { S: new Date().toISOString() }
+        }
     }));
 
-    // Simulación de tiempo (en producción SF usa .waitForTaskToken)
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    
-    return { ...event, step: "COOKED" };
+    // Retornamos inmediato. La Step Function se encargará de esperar los 60 segundos.
+    return { ...event, step: "COOKING_STARTED" };
 };
