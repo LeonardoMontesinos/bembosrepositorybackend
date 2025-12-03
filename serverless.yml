@@ -9,32 +9,38 @@ provider:
   name: aws
   runtime: nodejs20.x
   region: us-east-1
-  timeout: 29
-  memorySize: 1024
+  timeout: 30
+  memorySize: 2048
+  # Uso de AccountID dinámico para evitar errores en laboratorios
   iam:
-    role: arn:aws:iam::381492302977:role/LabRole
+    role: arn:aws:iam::${aws:accountId}:role/LabRole
 
   environment:
-    # --- Variables Existentes ---
+    # --- Tablas ---
     USER_TABLE: UserTable-${sls:stage}
     ORDERS_TABLE: OrdersTable-${sls:stage}
-    ORDERS_BUCKET: restaurant-orders-dashboard-${sls:stage}-${aws:accountId}
     MENU_TABLE: MenuTable-${sls:stage}
+    KITCHEN_TABLE: KitchenTable-${sls:stage}
+    KITCHEN_STATE_TABLE: KitchenStateTable-${sls:stage}
+    
+    # --- Buckets ---
+    ORDERS_BUCKET: restaurant-orders-dashboard-${sls:stage}-${aws:accountId}
     MENU_BUCKET: menu-bucket-${sls:stage}-${aws:accountId}
-    JWT_SECRET: 1234
+    
+    # --- Config General ---
+    JWT_SECRET: ${env:JWT_SECRET, '1234'}
     ALLOWED_ORIGINS: ${env:ALLOWED_ORIGINS, '*'}
     CORS_ALLOW_CREDENTIALS: ${env:CORS_ALLOW_CREDENTIALS, 'false'}
-    WS_STAGE: ${sls:stage}
+    SLS_STAGE: ${sls:stage}
     
-    KITCHEN_STATE_TABLE: KitchenStateTable-${sls:stage}
+    # --- Eventos e Infraestructura ---
     INGESTION_BUS: IngestionBus-${sls:stage}
     NOTIFICATION_BUS: NotificationBus-${sls:stage}
     WAITING_QUEUE_URL: { Ref: WaitingOrdersQueue }
     OPERATIONS_TOPIC_ARN: { Ref: OperationsAlertTopic }
     CUSTOMER_TOPIC_ARN: { Ref: CustomerNotificationTopic }
     
-    # --- CORRECCIÓN FINAL AQUÍ ---
-    # Construimos el ARN manualmente para evitar error de dependencia circular
+    # --- ARN de Step Function (Construido manualmente para evitar dependencia circular) ---
     STATE_MACHINE_ARN: 
       Fn::Join:
         - ":"
@@ -46,105 +52,94 @@ provider:
 
 package:
   patterns:
-    - scripts/**
-    - openapi.json
-
-custom: {}
+    - '!node_modules/aws-sdk/**'
+    - '!tests/**'
+    - '!docs/**'
 
 functions:
   # ===================================================
-  # 1. SERVICIOS ORIGINALES (Auth, Admin, Kitchen CRUD)
+  # 1. AUTENTICACIÓN
   # ===================================================
   register:
     handler: auth/register.handler
     events:
-      - http: 
-          path: auth/register
-          method: post
-          cors: true
+      - http: { path: auth/register, method: post, cors: true }
     environment:
       CUSTOMER_TOPIC_ARN: { Ref: CustomerNotificationTopic }
+  
   login:
     handler: auth/login.handler
     events:
       - http: { path: auth/login, method: post, cors: true }
+  
   authorizer:
     handler: authorizer.handler
 
-  # Admin & Workers
+  # ===================================================
+  # 2. ADMINISTRACIÓN
+  # ===================================================
   adminCreateWorker:
     handler: admin/createWorker.handler
     events:
       - http: { path: admin/workers, method: post, cors: true, authorizer: { name: authorizer, type: request, identitySource: method.request.header.Authorization } }
+  
   adminCreateMenu:
     handler: admin/createMenu.handler
     events:
       - http: { path: admin/menu, method: post, cors: true, authorizer: { name: authorizer, type: request, identitySource: method.request.header.Authorization } }
+  
   adminUpdateMenu:
     handler: admin/updateMenu.handler
     events:
       - http: { path: admin/menu, method: patch, cors: true, authorizer: { name: authorizer, type: request, identitySource: method.request.header.Authorization } }
 
-  # Kitchen Management
+  # ===================================================
+  # 3. GESTIÓN DE COCINAS (CRUD)
+  # ===================================================
   createKitchen:
     handler: kitchen/createKitchen.handler
     events:
       - http: { path: kitchens, method: post, cors: true, authorizer: { name: authorizer, type: request, identitySource: method.request.header.Authorization } }
+  
   listKitchens:
     handler: kitchen/listKitchens.handler
     events:
       - http: { path: kitchens, method: get, cors: true }
+  
   getMenu:
     handler: kitchen/getMenu.handler
     events:
       - http: { path: menu, method: get, cors: true }
 
-  # Orders (Lectura y Update manual)
+  # ===================================================
+  # 4. PEDIDOS (API)
+  # ===================================================
+  ordersCreate:
+    handler: orders/create.handler
+    events:
+      - http: { path: orders, method: post, cors: true, authorizer: { name: authorizer, type: request, identitySource: method.request.header.Authorization } }
+  
+  # LISTA INTELIGENTE (Admin ve todo / User ve suyos)
   ordersList:
-    handler: orders/index.list
+    handler: orders/list.handler 
     events:
       - http: { path: orders, method: get, cors: true, authorizer: { name: authorizer, type: request, identitySource: method.request.header.Authorization } }
+  
   ordersGet:
-    handler: orders/index.get
+    handler: orders/get.handler
     events:
-      - http: 
-          path: orders/{id}
-          method: get
-          cors: true
-          authorizer:
-            name: authorizer
-            type: request
-            identitySource: method.request.header.Authorization
+      - http: { path: orders/{id}, method: get, cors: true, authorizer: { name: authorizer, type: request, identitySource: method.request.header.Authorization } }
+  
   ordersUpdateStatus:
-    handler: orders/index.updateStatus
+    handler: orders/updateStatus.handler
     events:
-      - http:
-          path: orders/{id}/status
-          method: patch
-          cors: true
-          authorizer: 
-            name: authorizer
-            type: request
-            identitySource: method.request.header.Authorization
+      - http: { path: orders/{id}/status, method: patch, cors: true, authorizer: { name: authorizer, type: request, identitySource: method.request.header.Authorization } }
 
   # ===================================================
-  # 2. NUEVA ARQUITECTURA DE EVENTOS Y FLUJOS
+  # 5. ARQUITECTURA DE EVENTOS (Capacity & Flow)
   # ===================================================
   
-  # A. Entrada de Pedidos (Modificado para emitir evento)
-  ordersCreate:
-    handler: orders/create.handler # Apunta directo al archivo create.js
-    events:
-      - http:
-          path: orders
-          method: post
-          cors: true
-          authorizer:
-              name: authorizer
-              type: request
-              identitySource: method.request.header.Authorization
-
-  # B. Capacity Governor (Se activa con EventBridge 1)
+  # A. Checker: Revisa capacidad al crear orden
   capacityChecker:
     handler: capacity/checker.handler
     events:
@@ -154,26 +149,37 @@ functions:
             source: ['bembos.orders']
             detail-type: ['OrderCreated']
 
-  # C. Backpressure Management (Cola y Desencolado)
+  # B. Manager & Dequeue: Liberan espacio al terminar
   kitchenSpaceManager:
     handler: capacity/manager.handler
-    # Se invoca desde Step Function al finalizar
 
   dequeueOrder:
     handler: capacity/dequeue.handler
-    # Se invoca desde kitchenSpaceManager
 
-  # D. Step Function Tasks (Las 4 Lambdas)
+  # C. Workflow Tasks (Conectadas a BD)
   sfPrepare:
     handler: workflow/prepare.handler
+    environment:
+      ORDERS_TABLE: { Ref: OrdersTable }
+
   sfAssignCook:
     handler: workflow/assignCook.handler
+    environment:
+      ORDERS_TABLE: { Ref: OrdersTable }
+      USER_TABLE: { Ref: UserTable }
+
   sfCookProcess:
     handler: workflow/cook.handler
+    environment:
+      ORDERS_TABLE: { Ref: OrdersTable }
+
   sfDispatch:
     handler: workflow/dispatch.handler
+    environment:
+      ORDERS_TABLE: { Ref: OrdersTable }
+      NOTIFICATION_BUS: { Ref: NotificationBus }
 
-  # E. Notificaciones (Se activa con EventBridge 2)
+  # D. Notificaciones
   notifyCustomer:
     handler: notifications/emailCustomer.handler
     events:
@@ -184,18 +190,18 @@ functions:
             detail-type: ['OrderReady']
 
 # ===================================================
-# DEFINICIÓN STEP FUNCTION (State Machine)
+# STEP FUNCTION DEFINITION
 # ===================================================
 stepFunctions:
   stateMachines:
     KitchenWorkflow:
       name: KitchenWorkflow-${sls:stage}
-      role: arn:aws:iam::381492302977:role/LabRole 
+      role: arn:aws:iam::${aws:accountId}:role/LabRole
       definition:
-        Comment: "Flujo Inteligente: Espera 1 min y bifurca según Delivery/Tienda"
+        Comment: "Flujo Inteligente de Cocina Bembos"
         StartAt: PrepareData
         States:
-          # --- FASE 1: PREPARACIÓN ---
+          # FASE 1: Preparación
           PrepareData:
             Type: Task
             Resource: !GetAtt sfPrepare.Arn
@@ -206,52 +212,49 @@ stepFunctions:
             Resource: !GetAtt sfAssignCook.Arn
             Next: CookingPhase
           
-          # --- FASE 2: COCCIÓN ---
+          # FASE 2: Cocción
           CookingPhase:
             Type: Task
             Resource: !GetAtt sfCookProcess.Arn
-            Next: CookingWait # Ahora vamos a la espera
+            Next: CookingWait
           
-          # --- FASE 3: ESPERA (Simulación de tiempo real) ---
+          # FASE 3: Espera Real (1 minuto)
           CookingWait:
             Type: Wait
-            Seconds: 60 # <--- AQUÍ ESTÁ EL MINUTO QUE PEDISTE
+            Seconds: 60 
             Next: CheckOrderType
 
-          # --- FASE 4: DECISIÓN (EL CEREBRO) ---
+          # FASE 4: Decisión
           CheckOrderType:
             Type: Choice
             Choices:
               - Variable: "$.type"
                 StringEquals: "DELIVERY"
                 Next: ProcessDelivery
-              - Variable: "$.type"
-                StringEquals: "STORE"
-                Next: ProcessPickup
-            Default: ProcessPickup # Por defecto asumimos tienda
+            Default: ProcessPickup # "STORE" va aquí
 
-          # --- RAMA A: DELIVERY ---
+          # Rama Delivery
           ProcessDelivery:
             Type: Pass
             Parameters:
-              status: "SENDED" # Definimos el estado final
-              msg: "Tu repartidor va en camino"
-            ResultPath: "$.dispatchInfo" # Guardamos esto en el JSON
+              status: "SENDED"
+              msg: "Tu repartidor va en camino 🛵"
+            ResultPath: "$.dispatchInfo"
             Next: FinalizeOrder
 
-          # --- RAMA B: TIENDA ---
+          # Rama Tienda
           ProcessPickup:
             Type: Pass
             Parameters:
               status: "READY_PICKUP"
-              msg: "Tu pedido está listo para recoger en mostrador"
+              msg: "Listo para recoger en mostrador 🍔"
             ResultPath: "$.dispatchInfo"
             Next: FinalizeOrder
 
-          # --- FASE 5: ACTUALIZACIÓN Y NOTIFICACIÓN ---
+          # FASE 5: Finalización y Liberación
           FinalizeOrder:
             Type: Task
-            Resource: !GetAtt sfDispatch.Arn # Esta Lambda ahora debe leer el status del input
+            Resource: !GetAtt sfDispatch.Arn
             Next: ReleaseCapacity
 
           ReleaseCapacity:
@@ -261,7 +264,7 @@ stepFunctions:
 
 resources:
   Resources:
-    # --- RECURSOS ORIGINALES ---
+    # --- DYNAMODB ---
     UserTable:
       Type: AWS::DynamoDB::Table
       Properties:
@@ -299,11 +302,6 @@ resources:
           - { AttributeName: PK, KeyType: HASH }
           - { AttributeName: SK, KeyType: RANGE }
 
-    OrdersBucket:
-      Type: AWS::S3::Bucket
-      Properties:
-        BucketName: ${self:provider.environment.ORDERS_BUCKET}
-
     MenuTable:
       Type: AWS::DynamoDB::Table
       Properties:
@@ -316,15 +314,10 @@ resources:
           - { AttributeName: tenantId, KeyType: HASH }
           - { AttributeName: dishId, KeyType: RANGE }
 
-    MenuBucket:
-      Type: AWS::S3::Bucket
-      Properties:
-        BucketName: ${self:provider.environment.MENU_BUCKET}
-
     KitchenTable:
       Type: AWS::DynamoDB::Table
       Properties:
-        TableName: KitchenTable-${sls:stage}
+        TableName: ${self:provider.environment.KITCHEN_TABLE}
         BillingMode: PAY_PER_REQUEST
         AttributeDefinitions:
           - { AttributeName: tenantId, AttributeType: S }
@@ -333,9 +326,6 @@ resources:
           - { AttributeName: tenantId, KeyType: HASH }
           - { AttributeName: kitchenId, KeyType: RANGE }
 
-    # --- NUEVOS RECURSOS (Arquitectura Eventos) ---
-    
-    # 1. Tabla de Estado de Capacidad
     KitchenStateTable:
       Type: AWS::DynamoDB::Table
       Properties:
@@ -346,32 +336,50 @@ resources:
         KeySchema:
           - { AttributeName: kitchenId, KeyType: HASH }
 
-    # 2. EventBridge 1: Ingestion
+    # --- S3 BUCKETS ---
+    OrdersBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:provider.environment.ORDERS_BUCKET}
+
+    MenuBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:provider.environment.MENU_BUCKET}
+        # IMPORTANTE: Permitir ACL pública para imágenes
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: false
+          IgnorePublicAcls: false
+          BlockPublicPolicy: false
+          RestrictPublicBuckets: false
+        OwnershipControls:
+          Rules:
+            - ObjectOwnership: BucketOwnerPreferred
+
+    # --- EVENT BUSES ---
     IngestionBus:
       Type: AWS::Events::EventBus
       Properties:
         Name: ${self:provider.environment.INGESTION_BUS}
 
-    # 3. EventBridge 2: Notification
     NotificationBus:
       Type: AWS::Events::EventBus
       Properties:
         Name: ${self:provider.environment.NOTIFICATION_BUS}
 
-    # 4. SQS: Waiting Queue
+    # --- QUEUE ---
     WaitingOrdersQueue:
       Type: AWS::SQS::Queue
       Properties:
         QueueName: WaitingOrdersQueue-${sls:stage}
         MessageRetentionPeriod: 86400
 
-    # 5. SNS 1: Operaciones (Alerta de cocina llena)
+    # --- SNS TOPICS ---
     OperationsAlertTopic:
       Type: AWS::SNS::Topic
       Properties:
         TopicName: OperationsAlertTopic-${sls:stage}
 
-    # 6. SNS 2: Clientes (Notificación pedido listo)
     CustomerNotificationTopic:
       Type: AWS::SNS::Topic
       Properties:
