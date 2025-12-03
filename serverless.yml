@@ -127,18 +127,39 @@ functions:
   ordersGet:
     handler: orders/get.handler
     events:
-      - http: { path: orders/{id}, method: get, cors: true, authorizer: { name: authorizer, type: request, identitySource: method.request.header.Authorization } }
+      - http:
+          path: orders/{id}
+          method: get
+          cors: true
+          authorizer:
+            name: authorizer
+            type: request
+            identitySource: method.request.header.Authorization
   
   ordersUpdateStatus:
     handler: orders/updateStatus.handler
     events:
-      - http: { path: orders/{id}/status, method: patch, cors: true, authorizer: { name: authorizer, type: request, identitySource: method.request.header.Authorization } }
+      - http: 
+          path: orders/{id}/status
+          method: patch
+          cors: true
+          authorizer:
+            name: authorizer
+            type: request
+            identitySource: method.request.header.Authorization
 
   # HISTORIAL DE AUDITORÍA (GET)
   getOrderHistory:
     handler: orders/history.handler
     events:
-      - http: { path: orders/{id}/history, method: get, cors: true, authorizer: { name: authorizer, type: request, identitySource: method.request.header.Authorization } }
+      - http:
+          path: orders/{id}/history
+          method: get
+          cors: true
+          authorizer:
+            name: authorizer
+            type: request
+            identitySource: method.request.header.Authorization
 
   # ===================================================
   # 4. WEBSOCKETS (REAL-TIME)
