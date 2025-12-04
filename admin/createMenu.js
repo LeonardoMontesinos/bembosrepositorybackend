@@ -63,6 +63,7 @@ exports.handler = async (event) => {
       available: { BOOL: available === undefined ? true : !!available },
       createdAt: { S: now },
       updatedAt: { S: now },
+      offers: { BOOL: false }
     };
     if (description) item.description = { S: String(description) };
     if (finalImageUrl) item.imageUrl = { S: finalImageUrl };

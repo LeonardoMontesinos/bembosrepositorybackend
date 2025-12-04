@@ -1,4 +1,4 @@
-const { DynamoDBClient, ScanCommand, QueryCommand } = require('@aws-sdk/client-dynamodb');
+const { DynamoDBClient, QueryCommand } = require('@aws-sdk/client-dynamodb');
 const { json } = require('../http');
 
 const dynamo = new DynamoDBClient({});
@@ -6,38 +6,55 @@ const KITCHEN_TABLE = process.env.KITCHEN_TABLE || `KitchenTable-${process.env.S
 
 exports.handler = async (event) => {
   try {
+    // Prefer tenantId from query param if provided (front can force tenantId).
+    // Fallback to authorizer tenantId only when qs.tenantId is not present.
     const qs = event.queryStringParameters || {};
-    const tenantId = qs.tenantId;
-
-    let command;
-
-    // Si envían tenantId, hacemos Query (más eficiente)
-    if (tenantId) {
-      command = new QueryCommand({
-        TableName: KITCHEN_TABLE,
-        KeyConditionExpression: 'tenantId = :t',
-        ExpressionAttributeValues: { ':t': { S: tenantId } }
-      });
-    } else {
-      // Si no, hacemos Scan (trae todo, útil para admins o debug)
-      command = new ScanCommand({
-        TableName: KITCHEN_TABLE
-      });
+    let tenantId = qs.tenantId || null;
+    if (!tenantId && event && event.requestContext && event.requestContext.authorizer) {
+      const auth = event.requestContext.authorizer;
+      const claims = auth.claims || auth;
+      tenantId = auth.tenantId || (claims && claims.tenantId) || null;
+    }
+    if (!tenantId) {
+      return json(400, { message: 'tenantId required (authorizer or query param)' }, event);
     }
 
-    const result = await dynamo.send(command);
+    // Paginación: limit y lastKey
+    // Paginación: limit and lastKey — `qs` already defined above
+    const limit = qs.limit ? Math.max(1, Math.min(100, parseInt(qs.limit))) : 20;
+    let ExclusiveStartKey = undefined;
+    if (qs.lastKey) {
+      try {
+        ExclusiveStartKey = JSON.parse(Buffer.from(qs.lastKey, 'base64').toString('utf8'));
+      } catch (e) {
+        return json(400, { message: 'Invalid lastKey param' }, event);
+      }
+    }
 
-    const kitchens = (result.Items || []).map(k => ({
-      tenantId: k.tenantId?.S,
-      kitchenId: k.kitchenId?.S,
-      name: k.name?.S,
-      maxCooking: Number(k.maxCooking?.N || 0),
-      currentCooking: Number(k.currentCooking?.N || 0),
-      active: k.active?.BOOL || false,
-      createdAt: k.createdAt?.S
+    const params = {
+      TableName: KITCHEN_TABLE,
+      KeyConditionExpression: 'tenantId = :t',
+      ExpressionAttributeValues: { ':t': { S: tenantId } },
+      Limit: limit,
+    };
+    if (ExclusiveStartKey) params.ExclusiveStartKey = ExclusiveStartKey;
+
+    const result = await dynamo.send(new QueryCommand(params));
+
+    const kitchens = (result.Items || []).map(it => ({
+      kitchenId: it.kitchenId.S,
+      name: it.name?.S,
+      maxCooking: Number(it.maxCooking?.N || 0),
+      currentCooking: Number(it.currentCooking?.N || 0),
+      active: !!it.active?.BOOL,
     }));
 
-    return json(200, { kitchens }, event);
+    let nextKey = null;
+    if (result.LastEvaluatedKey) {
+      nextKey = Buffer.from(JSON.stringify(result.LastEvaluatedKey)).toString('base64');
+    }
+
+    return json(200, { kitchens, nextKey }, event);
   } catch (err) {
     console.error('LIST KITCHENS ERROR:', err);
     return json(500, { message: 'Server error', error: err.message }, event);

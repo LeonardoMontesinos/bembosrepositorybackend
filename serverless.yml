@@ -89,7 +89,19 @@ functions:
     handler: admin/createMenu.handler
     events:
       - http: { path: admin/menu, method: post, cors: true, authorizer: { name: authorizer, type: request, identitySource: method.request.header.Authorization } }
-  
+
+  adminUploadImage:
+    handler: admin/uploadImage.handler
+    events:
+      - http:
+          path: admin/menu/upload-image
+          method: post
+          cors: true
+          authorizer:
+            name: authorizer
+            type: request
+            identitySource: method.request.header.Authorization
+            
   adminUpdateMenu:
     handler: admin/updateMenu.handler
     events:
